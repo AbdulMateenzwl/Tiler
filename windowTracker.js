@@ -61,6 +61,8 @@ export class WindowTracker extends EventEmitter {
             return false;
         if (window.minimized)
             return false;
+        if (window.get_maximized() !== 0)
+            return false;
         return true;
     }
 
@@ -85,6 +87,14 @@ export class WindowTracker extends EventEmitter {
             }
         }));
 
+        signals.push(window.connect('notify::maximized-horizontally', () => {
+            this._onMaximizeChanged(window);
+        }));
+
+        signals.push(window.connect('notify::maximized-vertically', () => {
+            this._onMaximizeChanged(window);
+        }));
+
         const workspaceIndex = window.get_workspace().index();
         this._trackedWindows.set(window, { workspaceIndex, signals });
 
@@ -96,6 +106,27 @@ export class WindowTracker extends EventEmitter {
         if (!data) return;
         data.signals.forEach(id => window.disconnect(id));
         this._trackedWindows.delete(window);
+    }
+
+    _onMaximizeChanged(window) {
+        const isMaximized = window.get_maximized() !== 0;
+
+        if (isMaximized) {
+            // Window just got maximized — remove from tiling layer
+            this._untrackWindow(window);
+            this.emit('window-removed', window);
+
+            // Keep watching it so we know when it gets unmaximized
+            const id = window.connect('notify::maximized-horizontally', () => {
+                if (window.get_maximized() === 0) {
+                    window.disconnect(id);
+                    if (this._shouldTrack(window)) {
+                        this._trackWindow(window);
+                        this.emit('window-added', window, window.get_workspace().index());
+                    }
+                }
+            });
+        }
     }
 
     _onWindowCreated(window) {

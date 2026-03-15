@@ -1,4 +1,5 @@
 // tileManager.js
+import GLib from 'gi://GLib';
 import Clutter from 'gi://Clutter';
 import { LayoutEngine } from './layoutEngine.js';
 
@@ -11,15 +12,14 @@ export class TileManager {
     enable() {
         this._signals.push(
             this._tracker.connect('window-added', (_, window, wsIndex) => {
-                // Wait for window to be fully mapped before applying layout
-                if (window.get_compositor_private()) {
+                // Apply immediately for existing windows
+                this._applyLayout(wsIndex);
+
+                // Apply again after a short delay to catch the new window once mapped
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                     this._applyLayout(wsIndex);
-                } else {
-                    const id = window.connect('notify::appears-focused', () => {
-                        window.disconnect(id);
-                        this._applyLayout(wsIndex);
-                    });
-                }
+                    return GLib.SOURCE_REMOVE;
+                });
             })
         );
 
