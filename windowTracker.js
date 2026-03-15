@@ -12,6 +12,7 @@ export class WindowTracker extends EventEmitter {
         this._nextIndex = 1;
         this._windowSignals = new Map();
         this._displaySignals = [];
+        this._unmaximizedStore = new Map();
     }
 
     enable() {
@@ -40,6 +41,9 @@ export class WindowTracker extends EventEmitter {
         for (const [window, id] of this._minimizedStore) {
             window.disconnect(id);
         }
+
+        this._unmaximizedStore.clear();
+
         this._minimizedStore.clear();
 
         this._tilingArray = [];
@@ -100,6 +104,11 @@ export class WindowTracker extends EventEmitter {
                 window.disconnect(minId);
                 this._minimizedStore.delete(window);
             }
+            const unminId = this._unmaximizedStore.get(window);
+            if (unminId) {
+                window.disconnect(unminId);
+                this._unmaximizedStore.delete(window);
+            }
             this._disconnectWindowSignals(window);
             this.emit('window-removed', window);
         }));
@@ -118,9 +127,24 @@ export class WindowTracker extends EventEmitter {
             const wsIndex = window.get_workspace().index();
             this.emit('window-workspace-changed', window, wsIndex);
         }));
-
+        // in _connectWindowSignals, replace the maximized signal with this:
         signals.push(window.connect('notify::maximized-horizontally', () => {
-            this._onMaximizeChanged(window);
+            const isMaximized = window.get_maximized() !== 0;
+
+            if (isMaximized) {
+                const entry = this._removeFromTiling(window);
+                if (!entry) return;
+                this._maximizedStore.push(entry);
+                this.emit('window-removed', window);
+            } else {
+                const stored = this._maximizedStore.find(e => e.window === window);
+                if (stored) {
+                    this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
+                    this._tilingArray.push(stored);
+                    const wsIndex = window.get_workspace().index();
+                    this.emit('window-added', window, wsIndex);
+                }
+            }
         }));
 
         this._windowSignals.set(window, signals);
@@ -133,24 +157,19 @@ export class WindowTracker extends EventEmitter {
         this._windowSignals.delete(window);
     }
 
-    _watchForUnminimize(window) {
-        const id = window.connect('notify::minimized', () => {
-            if (!window.minimized) {
-                window.disconnect(id);
-                this._minimizedStore.delete(window);
+    _watchForUnmaximize(window) {
+        // Avoid double-watching
+        if (this._unmaximizedStore.has(window)) return;
 
-                // Check if it restored to maximized or normal
-                if (window.get_maximized() !== 0) {
-                    // Restored to maximized — GNOME handles it
-                    // Just watch for future unmaximize
-                    this._watchForUnmaximize(window);
-                } else {
-                    // Restored to normal — add back to tiling as new window
+        const id = window.connect('notify::maximized-horizontally', () => {
+            if (window.get_maximized() === 0) {
+                window.disconnect(id);
+                this._unmaximizedStore.delete(window);
+                if (this._shouldTrack(window))
                     this._addToTiling(window);
-                }
             }
         });
-        this._minimizedStore.set(window, id);
+        this._unmaximizedStore.set(window, id);
     }
 
     _watchForUnmaximize(window) {
@@ -161,31 +180,6 @@ export class WindowTracker extends EventEmitter {
                     this._addToTiling(window);
             }
         });
-    }
-
-    _onMaximizeChanged(window) {
-        const isMaximized = window.get_maximized() !== 0;
-
-        if (isMaximized) {
-            const entry = this._removeFromTiling(window);
-            if (!entry) return;
-
-            this._maximizedStore.push(entry);
-            this.emit('window-removed', window);
-
-            const id = window.connect('notify::maximized-horizontally', () => {
-                if (window.get_maximized() === 0) {
-                    window.disconnect(id);
-                    const stored = this._maximizedStore.find(e => e.window === window);
-                    if (stored) {
-                        this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
-                        this._tilingArray.push(stored);
-                        const wsIndex = window.get_workspace().index();
-                        this.emit('window-added', window, wsIndex);
-                    }
-                }
-            });
-        }
     }
 
     _onWindowCreated(window) {
