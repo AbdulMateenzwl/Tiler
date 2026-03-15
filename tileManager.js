@@ -30,9 +30,13 @@ export class TileManager {
             })
         );
 
+
         this._signals.push(
-            this._tracker.connect('window-workspace-changed', (_, window, wsIndex) => {
-                this._applyLayout(wsIndex);
+            this._tracker.connect('window-workspace-changed', (_, window, newWsIndex) => {
+                const wsCount = global.workspace_manager.get_n_workspaces();
+                for (let i = 0; i < wsCount; i++) {
+                    this._applyLayout(i);
+                }
             })
         );
     }
