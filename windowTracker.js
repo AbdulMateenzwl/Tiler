@@ -8,11 +8,11 @@ export class WindowTracker extends EventEmitter {
         super();
         this._tilingArray = [];
         this._maximizedStore = [];
-        this._minimizedStore = new Map(); // MetaWindow -> unminimize signal id
+        this._minimizedStore = new Map();
+        this._minimizedPositionStore = [];
         this._nextIndex = 1;
         this._windowSignals = new Map();
         this._displaySignals = [];
-        this._unmaximizedStore = new Map();
     }
 
     enable() {
@@ -37,14 +37,11 @@ export class WindowTracker extends EventEmitter {
         }
         this._windowSignals.clear();
 
-        // Clean up minimized watchers
         for (const [window, id] of this._minimizedStore) {
             window.disconnect(id);
         }
-
-        this._unmaximizedStore.clear();
-
         this._minimizedStore.clear();
+        this._minimizedPositionStore = [];
 
         this._tilingArray = [];
         this._maximizedStore = [];
@@ -75,6 +72,9 @@ export class WindowTracker extends EventEmitter {
     }
 
     _addToTiling(window, index = null) {
+        // Guard against double tracking
+        if (this._tilingArray.some(e => e.window === window)) return;
+
         const assignedIndex = index !== null ? index : this._nextIndex++;
         const id = this._generateId(window);
 
@@ -93,21 +93,19 @@ export class WindowTracker extends EventEmitter {
     }
 
     _connectWindowSignals(window) {
+        // Guard against double connecting
+        if (this._windowSignals.has(window)) return;
+
         const signals = [];
 
         signals.push(window.connect('unmanaged', () => {
             this._removeFromTiling(window);
             this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
-            // Clean up any minimized watcher too
+            this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
             const minId = this._minimizedStore.get(window);
             if (minId) {
                 window.disconnect(minId);
                 this._minimizedStore.delete(window);
-            }
-            const unminId = this._unmaximizedStore.get(window);
-            if (unminId) {
-                window.disconnect(unminId);
-                this._unmaximizedStore.delete(window);
             }
             this._disconnectWindowSignals(window);
             this.emit('window-removed', window);
@@ -115,8 +113,8 @@ export class WindowTracker extends EventEmitter {
 
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
-                // Remove from tiling but keep watching for restore
-                this._removeFromTiling(window);
+                const entry = this._removeFromTiling(window);
+                if (entry) this._minimizedPositionStore.push(entry); // save position
                 this._disconnectWindowSignals(window);
                 this.emit('window-removed', window);
                 this._watchForUnminimize(window);
@@ -127,22 +125,24 @@ export class WindowTracker extends EventEmitter {
             const wsIndex = window.get_workspace().index();
             this.emit('window-workspace-changed', window, wsIndex);
         }));
-        // in _connectWindowSignals, replace the maximized signal with this:
+
         signals.push(window.connect('notify::maximized-horizontally', () => {
             const isMaximized = window.get_maximized() !== 0;
+            const wsIndex = window.get_workspace().index();
 
             if (isMaximized) {
                 const entry = this._removeFromTiling(window);
                 if (!entry) return;
                 this._maximizedStore.push(entry);
                 this.emit('window-removed', window);
+                this.emit('window-maximized', window, wsIndex);
             } else {
                 const stored = this._maximizedStore.find(e => e.window === window);
                 if (stored) {
                     this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
                     this._tilingArray.push(stored);
-                    const wsIndex = window.get_workspace().index();
                     this.emit('window-added', window, wsIndex);
+                    this.emit('window-unmaximized', window, wsIndex);
                 }
             }
         }));
@@ -157,19 +157,33 @@ export class WindowTracker extends EventEmitter {
         this._windowSignals.delete(window);
     }
 
-    _watchForUnmaximize(window) {
-        // Avoid double-watching
-        if (this._unmaximizedStore.has(window)) return;
-
-        const id = window.connect('notify::maximized-horizontally', () => {
-            if (window.get_maximized() === 0) {
+    _watchForUnminimize(window) {
+        const id = window.connect('notify::minimized', () => {
+            if (!window.minimized) {
                 window.disconnect(id);
-                this._unmaximizedStore.delete(window);
-                if (this._shouldTrack(window))
-                    this._addToTiling(window);
+                this._minimizedStore.delete(window);
+
+                if (window.get_maximized() !== 0) {
+                    // Restored to maximized — clean up position store, watch for unmaximize
+                    this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
+                    this._watchForUnmaximize(window);
+                } else {
+                    // Restore to original tiling position
+                    const stored = this._minimizedPositionStore.find(e => e.window === window);
+                    if (stored) {
+                        this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
+                        this._tilingArray.push(stored);
+                        this._connectWindowSignals(window);
+                        const wsIndex = window.get_workspace().index();
+                        this.emit('window-added', window, wsIndex);
+                    } else {
+                        // No saved position, add as new window
+                        this._addToTiling(window);
+                    }
+                }
             }
         });
-        this._unmaximizedStore.set(window, id);
+        this._minimizedStore.set(window, id);
     }
 
     _watchForUnmaximize(window) {
@@ -185,17 +199,13 @@ export class WindowTracker extends EventEmitter {
     _onWindowCreated(window) {
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             const maximized = window.get_maximized();
-            console.log(`[Tiler] window-created: "${window.get_title()}" type=${window.get_window_type()} skip=${window.is_skip_taskbar()} minimized=${window.minimized} maximized=${maximized} tracking=${this._shouldTrack(window)}`);
-
             if (this._shouldTrack(window)) {
                 this._addToTiling(window);
             } else if (window.get_window_type() === Meta.WindowType.NORMAL
                 && !window.is_skip_taskbar()
                 && maximized !== 0) {
-                // Window opened in maximized state — watch for unmaximize
                 this._watchForUnmaximize(window);
             }
-
             return GLib.SOURCE_REMOVE;
         });
     }
