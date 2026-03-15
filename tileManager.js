@@ -1,6 +1,8 @@
 // tileManager.js
 import GLib from 'gi://GLib';
 import { LayoutEngine } from './layoutEngine.js';
+import Meta from 'gi://Meta';
+import Clutter from 'gi://Clutter';
 
 export class TileManager {
     constructor(tracker) {
@@ -11,6 +13,8 @@ export class TileManager {
     }
 
     enable() {
+        this._grabActive = false;
+
         this._tracker.connect('window-added', (_, window, wsIndex) => {
             this._scheduleLayout(wsIndex);
         });
@@ -35,7 +39,6 @@ export class TileManager {
         });
 
         this._tracker.connect('window-maximized', (_, window, wsIndex) => {
-            // Lower all tiled windows so maximized window sits on top
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
                 this._lowerTiledWindows(wsIndex);
                 window.raise();
@@ -46,6 +49,20 @@ export class TileManager {
         this._displaySignals.push(
             global.display.connect('notify::focus-window', () => {
                 this._onFocusChanged();
+            })
+        );
+
+        this._displaySignals.push(
+            global.display.connect('grab-op-begin', (display, window, grabOp) => {
+                if (this._isMovingGrab(grabOp))
+                    this._grabActive = true;
+            })
+        );
+
+        this._displaySignals.push(
+            global.display.connect('grab-op-end', (display, window, grabOp) => {
+                this._grabActive = false;
+                this._onGrabOpEnd(window, grabOp);
             })
         );
     }
@@ -98,6 +115,7 @@ export class TileManager {
         const layout = LayoutEngine.calculateColumns(windows, workArea, 8);
 
         layout.forEach(({ window, x, y, width, height }) => {
+            if (this._grabActive && window === global.display.focus_window) return;
             this._moveWindow(window, x, y, width, height);
         });
     }
@@ -118,14 +136,63 @@ export class TileManager {
         const actor = window.get_compositor_private();
         if (!actor) return;
 
+        const frame = window.get_frame_rect();
+        if (frame.width === 0 || frame.height === 0) {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+                window.move_resize_frame(false, x, y, width, height);
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
+
+        window.move_resize_frame(false, x, y, width, height);
+    }
+
+    _animateWindow(window, x, y, width, height) {
+        const actor = window.get_compositor_private();
+        if (!actor) return;
+
+        const currentX = actor.x;
+        const currentY = actor.y;
+
         window.move_resize_frame(false, x, y, width, height);
 
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-            const frame = window.get_frame_rect();
-            if (frame.x !== x || frame.y !== y || frame.width !== width || frame.height !== height) {
-                window.move_resize_frame(false, x, y, width, height);
-            }
-            return GLib.SOURCE_REMOVE;
+        const frame = window.get_frame_rect();
+        const buffer = window.get_buffer_rect();
+        const offsetX = frame.x - buffer.x;
+        const offsetY = frame.y - buffer.y;
+        const targetActorX = x - offsetX;
+        const targetActorY = y - offsetY;
+
+        actor.set_position(currentX, currentY);
+        actor.ease({
+            x: targetActorX,
+            y: targetActorY,
+            duration: 200,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
+    }
+
+    _onGrabOpEnd(window, grabOp) {
+        console.log(`[Tiler] _onGrabOpEnd: grabOp=${grabOp} isMoving=${this._isMovingGrab(grabOp)}`);
+        if (!this._isMovingGrab(grabOp)) return;
+
+        const wsIndex = window.get_workspace().index();
+        const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
+        console.log(`[Tiler] _onGrabOpEnd: inTiling=${tiledWindows.some(w => w === window)}`);
+        if (!tiledWindows.some(w => w === window)) return;
+
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const layout = LayoutEngine.calculateColumns(tiledWindows, workArea, 8);
+        const target = layout.find(l => l.window === window);
+        if (!target) return;
+
+        this._animateWindow(window, target.x, target.y, target.width, target.height);
+    }
+
+    _isMovingGrab(grabOp) {
+        return grabOp === Meta.GrabOp.MOVING ||
+            grabOp === Meta.GrabOp.KEYBOARD_MOVING ||
+            grabOp === 1025; 
     }
 }

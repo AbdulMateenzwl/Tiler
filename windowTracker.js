@@ -13,6 +13,7 @@ export class WindowTracker extends EventEmitter {
         this._nextIndex = 1;
         this._windowSignals = new Map();
         this._displaySignals = [];
+        this._recentlyUnmaximized = new Set();
     }
 
     enable() {
@@ -46,6 +47,10 @@ export class WindowTracker extends EventEmitter {
         this._tilingArray = [];
         this._maximizedStore = [];
         this._nextIndex = 1;
+    }
+
+    wasRecentlyUnmaximized(window) {
+        return this._recentlyUnmaximized.has(window);
     }
 
     getWindowsForWorkspace(workspaceIndex) {
@@ -141,6 +146,14 @@ export class WindowTracker extends EventEmitter {
                 if (stored) {
                     this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
                     this._tilingArray.push(stored);
+
+                    // Mark as recently unmaximized for 1 second
+                    this._recentlyUnmaximized.add(window);
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                        this._recentlyUnmaximized.delete(window);
+                        return GLib.SOURCE_REMOVE;
+                    });
+
                     this.emit('window-added', window, wsIndex);
                     this.emit('window-unmaximized', window, wsIndex);
                 }
