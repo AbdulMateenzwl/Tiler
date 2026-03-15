@@ -48,6 +48,8 @@ export class TileManager {
 
     _applyLayout(wsIndex) {
         const windows = this._tracker.getWindowsForWorkspace(wsIndex);
+        console.log(`[Tiler] applyLayout ws=${wsIndex} windowCount=${windows.length}`);
+        windows.forEach(w => console.log(`[Tiler]   - "${w.get_title()}"`));
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const layout = LayoutEngine.calculateColumns(windows, workArea, 8);
 
@@ -60,7 +62,15 @@ export class TileManager {
         const actor = window.get_compositor_private();
         if (!actor) return;
 
-        // Move the actual window frame
         window.move_resize_frame(false, x, y, width, height);
+
+        // Verify the move took effect, retry if not
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            const frame = window.get_frame_rect();
+            if (frame.x !== x || frame.y !== y || frame.width !== width || frame.height !== height) {
+                window.move_resize_frame(false, x, y, width, height);
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 }

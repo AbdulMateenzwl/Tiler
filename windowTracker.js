@@ -190,13 +190,18 @@ export class WindowTracker extends EventEmitter {
 
     _onWindowCreated(window) {
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            const type = window.get_window_type();
-            const skip = window.is_skip_taskbar();
-            const minimized = window.minimized;
             const maximized = window.get_maximized();
-            console.log(`[Tiler] window-created: "${window.get_title()}" type=${type} skip=${skip} minimized=${minimized} maximized=${maximized} tracking=${this._shouldTrack(window)}`);
-            if (this._shouldTrack(window))
+            console.log(`[Tiler] window-created: "${window.get_title()}" type=${window.get_window_type()} skip=${window.is_skip_taskbar()} minimized=${window.minimized} maximized=${maximized} tracking=${this._shouldTrack(window)}`);
+
+            if (this._shouldTrack(window)) {
                 this._addToTiling(window);
+            } else if (window.get_window_type() === Meta.WindowType.NORMAL
+                && !window.is_skip_taskbar()
+                && maximized !== 0) {
+                // Window opened in maximized state — watch for unmaximize
+                this._watchForUnmaximize(window);
+            }
+
             return GLib.SOURCE_REMOVE;
         });
     }
