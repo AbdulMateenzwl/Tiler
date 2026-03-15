@@ -6,13 +6,10 @@ import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
 export class WindowTracker extends EventEmitter {
     constructor() {
         super();
-        // tilingArray: [{index, id, window}] sorted by index
         this._tilingArray = [];
-        // maximizedStore: [{index, id, window}] — removed from tiling but remembered
         this._maximizedStore = [];
-        // counter for assigning unique permanent indices
+        this._minimizedStore = new Map(); // MetaWindow -> unminimize signal id
         this._nextIndex = 1;
-        // per-window signal ids: Map<MetaWindow, number[]>
         this._windowSignals = new Map();
         this._displaySignals = [];
     }
@@ -24,7 +21,6 @@ export class WindowTracker extends EventEmitter {
             })
         );
 
-        // Track already-open windows on startup
         global.display.list_all_windows().forEach(window => {
             if (this._shouldTrack(window))
                 this._addToTiling(window);
@@ -39,12 +35,18 @@ export class WindowTracker extends EventEmitter {
             signals.forEach(id => window.disconnect(id));
         }
         this._windowSignals.clear();
+
+        // Clean up minimized watchers
+        for (const [window, id] of this._minimizedStore) {
+            window.disconnect(id);
+        }
+        this._minimizedStore.clear();
+
         this._tilingArray = [];
         this._maximizedStore = [];
         this._nextIndex = 1;
     }
 
-    // Returns windows for a workspace in column order
     getWindowsForWorkspace(workspaceIndex) {
         return this._tilingArray
             .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
@@ -65,7 +67,6 @@ export class WindowTracker extends EventEmitter {
     }
 
     _generateId(window) {
-        // Unique id: pid + window's XID/wayland id
         return `${window.get_pid()}-${window.get_id()}`;
     }
 
@@ -93,15 +94,23 @@ export class WindowTracker extends EventEmitter {
         signals.push(window.connect('unmanaged', () => {
             this._removeFromTiling(window);
             this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
+            // Clean up any minimized watcher too
+            const minId = this._minimizedStore.get(window);
+            if (minId) {
+                window.disconnect(minId);
+                this._minimizedStore.delete(window);
+            }
             this._disconnectWindowSignals(window);
             this.emit('window-removed', window);
         }));
 
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
+                // Remove from tiling but keep watching for restore
                 this._removeFromTiling(window);
                 this._disconnectWindowSignals(window);
                 this.emit('window-removed', window);
+                this._watchForUnminimize(window);
             }
         }));
 
@@ -124,6 +133,36 @@ export class WindowTracker extends EventEmitter {
         this._windowSignals.delete(window);
     }
 
+    _watchForUnminimize(window) {
+        const id = window.connect('notify::minimized', () => {
+            if (!window.minimized) {
+                window.disconnect(id);
+                this._minimizedStore.delete(window);
+
+                // Check if it restored to maximized or normal
+                if (window.get_maximized() !== 0) {
+                    // Restored to maximized — GNOME handles it
+                    // Just watch for future unmaximize
+                    this._watchForUnmaximize(window);
+                } else {
+                    // Restored to normal — add back to tiling as new window
+                    this._addToTiling(window);
+                }
+            }
+        });
+        this._minimizedStore.set(window, id);
+    }
+
+    _watchForUnmaximize(window) {
+        const id = window.connect('notify::maximized-horizontally', () => {
+            if (window.get_maximized() === 0) {
+                window.disconnect(id);
+                if (this._shouldTrack(window))
+                    this._addToTiling(window);
+            }
+        });
+    }
+
     _onMaximizeChanged(window) {
         const isMaximized = window.get_maximized() !== 0;
 
@@ -131,15 +170,12 @@ export class WindowTracker extends EventEmitter {
             const entry = this._removeFromTiling(window);
             if (!entry) return;
 
-            // Save to maximized store with its permanent index
             this._maximizedStore.push(entry);
             this.emit('window-removed', window);
 
-            // Watch for unmaximize
             const id = window.connect('notify::maximized-horizontally', () => {
                 if (window.get_maximized() === 0) {
                     window.disconnect(id);
-                    // Restore to tiling with original index
                     const stored = this._maximizedStore.find(e => e.window === window);
                     if (stored) {
                         this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);

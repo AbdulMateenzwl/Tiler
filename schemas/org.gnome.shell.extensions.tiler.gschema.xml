@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+    <schema id="org.gnome.shell.extensions.tiler" path="/org/gnome/shell/extensions/tiler/">
+        <key name="retile-windows" type="as">
+            <default>['&lt;Super&gt;&lt;Alt&gt;t']</default>
+            <summary>Retile all windows</summary>
+        </key>
+    </schema>
+</schemalist>
