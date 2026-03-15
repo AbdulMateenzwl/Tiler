@@ -1,36 +1,33 @@
 // windowTracker.js
 import Meta from 'gi://Meta';
-import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
 import GLib from 'gi://GLib';
+import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
 
 export class WindowTracker extends EventEmitter {
     constructor() {
         super();
-        this._trackedWindows = new Map(); // MetaWindow -> {workspace, signals}
+        // tilingArray: [{index, id, window}] sorted by index
+        this._tilingArray = [];
+        // maximizedStore: [{index, id, window}] — removed from tiling but remembered
+        this._maximizedStore = [];
+        // counter for assigning unique permanent indices
+        this._nextIndex = 1;
+        // per-window signal ids: Map<MetaWindow, number[]>
+        this._windowSignals = new Map();
         this._displaySignals = [];
     }
 
     enable() {
-        console.log('[Tiler] enable(1) called');
-        const display = global.display;
-
         this._displaySignals.push(
-            global.screen
-                ? global.screen.connect('window-created', (_, window) => {
-                    console.log('[Tiler] window-created via screen');
-                    this._onWindowCreated(window);
-                })
-                : global.display.connect('window-created', (_, window) => {
-                    console.log('[Tiler] window-created via display');
-                    this._onWindowCreated(window);
-                })
+            global.display.connect('window-created', (_, window) => {
+                this._onWindowCreated(window);
+            })
         );
 
         // Track already-open windows on startup
-        display.list_all_windows().forEach(window => {
-            if (this._shouldTrack(window)) {
-                this._trackWindow(window);
-            }
+        global.display.list_all_windows().forEach(window => {
+            if (this._shouldTrack(window))
+                this._addToTiling(window);
         });
     }
 
@@ -38,20 +35,21 @@ export class WindowTracker extends EventEmitter {
         this._displaySignals.forEach(id => global.display.disconnect(id));
         this._displaySignals = [];
 
-        for (const [window, data] of this._trackedWindows) {
-            data.signals.forEach(id => window.disconnect(id));
+        for (const [window, signals] of this._windowSignals) {
+            signals.forEach(id => window.disconnect(id));
         }
-        this._trackedWindows.clear();
+        this._windowSignals.clear();
+        this._tilingArray = [];
+        this._maximizedStore = [];
+        this._nextIndex = 1;
     }
 
+    // Returns windows for a workspace in column order
     getWindowsForWorkspace(workspaceIndex) {
-        const result = [];
-        for (const [window, data] of this._trackedWindows) {
-            if (data.workspaceIndex === workspaceIndex) {
-                result.push(window);
-            }
-        }
-        return result;
+        return this._tilingArray
+            .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
+            .sort((a, b) => a.index - b.index)
+            .map(entry => entry.window);
     }
 
     _shouldTrack(window) {
@@ -66,63 +64,88 @@ export class WindowTracker extends EventEmitter {
         return true;
     }
 
-    _trackWindow(window) {
+    _generateId(window) {
+        // Unique id: pid + window's XID/wayland id
+        return `${window.get_pid()}-${window.get_id()}`;
+    }
+
+    _addToTiling(window, index = null) {
+        const assignedIndex = index !== null ? index : this._nextIndex++;
+        const id = this._generateId(window);
+
+        this._tilingArray.push({ index: assignedIndex, id, window });
+        this._connectWindowSignals(window);
+
+        const wsIndex = window.get_workspace().index();
+        this.emit('window-added', window, wsIndex);
+    }
+
+    _removeFromTiling(window) {
+        const i = this._tilingArray.findIndex(e => e.window === window);
+        if (i === -1) return null;
+        const [entry] = this._tilingArray.splice(i, 1);
+        return entry;
+    }
+
+    _connectWindowSignals(window) {
         const signals = [];
 
         signals.push(window.connect('unmanaged', () => {
-            this._untrackWindow(window);
+            this._removeFromTiling(window);
+            this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
+            this._disconnectWindowSignals(window);
             this.emit('window-removed', window);
-        }));
-
-        signals.push(window.connect('workspace-changed', () => {
-            const idx = window.get_workspace().index();
-            this._trackedWindows.get(window).workspaceIndex = idx;
-            this.emit('window-workspace-changed', window, idx);
         }));
 
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
-                this._untrackWindow(window);
+                this._removeFromTiling(window);
+                this._disconnectWindowSignals(window);
                 this.emit('window-removed', window);
             }
+        }));
+
+        signals.push(window.connect('workspace-changed', () => {
+            const wsIndex = window.get_workspace().index();
+            this.emit('window-workspace-changed', window, wsIndex);
         }));
 
         signals.push(window.connect('notify::maximized-horizontally', () => {
             this._onMaximizeChanged(window);
         }));
 
-        signals.push(window.connect('notify::maximized-vertically', () => {
-            this._onMaximizeChanged(window);
-        }));
-
-        const workspaceIndex = window.get_workspace().index();
-        this._trackedWindows.set(window, { workspaceIndex, signals });
-
-        this.emit('window-added', window, workspaceIndex);
+        this._windowSignals.set(window, signals);
     }
 
-    _untrackWindow(window) {
-        const data = this._trackedWindows.get(window);
-        if (!data) return;
-        data.signals.forEach(id => window.disconnect(id));
-        this._trackedWindows.delete(window);
+    _disconnectWindowSignals(window) {
+        const signals = this._windowSignals.get(window);
+        if (!signals) return;
+        signals.forEach(id => window.disconnect(id));
+        this._windowSignals.delete(window);
     }
 
     _onMaximizeChanged(window) {
         const isMaximized = window.get_maximized() !== 0;
 
         if (isMaximized) {
-            // Window just got maximized — remove from tiling layer
-            this._untrackWindow(window);
+            const entry = this._removeFromTiling(window);
+            if (!entry) return;
+
+            // Save to maximized store with its permanent index
+            this._maximizedStore.push(entry);
             this.emit('window-removed', window);
 
-            // Keep watching it so we know when it gets unmaximized
+            // Watch for unmaximize
             const id = window.connect('notify::maximized-horizontally', () => {
                 if (window.get_maximized() === 0) {
                     window.disconnect(id);
-                    if (this._shouldTrack(window)) {
-                        this._trackWindow(window);
-                        this.emit('window-added', window, window.get_workspace().index());
+                    // Restore to tiling with original index
+                    const stored = this._maximizedStore.find(e => e.window === window);
+                    if (stored) {
+                        this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
+                        this._tilingArray.push(stored);
+                        const wsIndex = window.get_workspace().index();
+                        this.emit('window-added', window, wsIndex);
                     }
                 }
             });
@@ -130,14 +153,9 @@ export class WindowTracker extends EventEmitter {
     }
 
     _onWindowCreated(window) {
-        const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            const type = window.get_window_type();
-            const skip = window.is_skip_taskbar();
-            const minimized = window.minimized;
-            console.log(`[Tiler] window-created: "${window.get_title()}" type=${type} skip=${skip} minimized=${minimized} tracking=${this._shouldTrack(window)}`);
-            if (this._shouldTrack(window)) {
-                this._trackWindow(window);
-            }
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (this._shouldTrack(window))
+                this._addToTiling(window);
             return GLib.SOURCE_REMOVE;
         });
     }
