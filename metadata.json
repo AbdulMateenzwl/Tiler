@@ -1,0 +1,8 @@
+{
+  "name": "Tiler",
+  "description": "Custom tiling extension",
+  "uuid": "tiler@yourname",
+  "shell-version": ["48"],
+  "session-modes": ["user"],
+  "version": 1
+}
