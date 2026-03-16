@@ -49,6 +49,29 @@ export class WindowTracker extends EventEmitter {
         this._nextIndex = 1;
     }
 
+    _assignInitialRatio(wsIndex) {
+        const entries = this._tilingArray.filter(e => e.window.get_workspace().index() === wsIndex);
+        const count = entries.length;
+        if (count === 0) return;
+        const equal = 1.0 / count;
+        entries.forEach(e => e.widthRatio = equal);
+    }
+
+    _normalizeRatios(wsIndex) {
+        const entries = this._tilingArray.filter(e => e.window.get_workspace().index() === wsIndex);
+        if (entries.length === 0) return;
+
+        const sum = entries.reduce((acc, e) => acc + e.widthRatio, 0);
+        if (sum === 0) {
+            // Fallback to equal ratios if sum is 0
+            const equal = 1.0 / entries.length;
+            entries.forEach(e => e.widthRatio = equal);
+            return;
+        }
+
+        entries.forEach(e => e.widthRatio = e.widthRatio / sum);
+    }
+
     wasRecentlyUnmaximized(window) {
         return this._recentlyUnmaximized.has(window);
     }
@@ -77,34 +100,87 @@ export class WindowTracker extends EventEmitter {
     }
 
     _addToTiling(window, index = null) {
-        // Guard against double tracking
         if (this._tilingArray.some(e => e.window === window)) return;
 
         const assignedIndex = index !== null ? index : this._nextIndex++;
         const id = this._generateId(window);
 
-        this._tilingArray.push({ index: assignedIndex, id, window });
+        this._tilingArray.push({ index: assignedIndex, id, window, widthRatio: 0 });
         this._connectWindowSignals(window);
 
         const wsIndex = window.get_workspace().index();
+        // Reassign equal ratios to all windows on this workspace
+        this._assignInitialRatio(wsIndex);
+
         this.emit('window-added', window, wsIndex);
     }
 
-    _removeFromTiling(window) {
+    _removeFromTiling(window, normalize = true, wsIndex = null) {
         const i = this._tilingArray.findIndex(e => e.window === window);
         if (i === -1) return null;
         const [entry] = this._tilingArray.splice(i, 1);
+
+        if (normalize) {
+            const idx = wsIndex ?? (() => {
+                try { return entry.window.get_workspace()?.index(); } catch { return null; }
+            })();
+            if (idx !== null && idx !== undefined)
+                this._normalizeRatios(idx);
+        }
+
         return entry;
     }
 
+    getWindowsWithRatiosForWorkspace(workspaceIndex) {
+        const all = this._tilingArray.map(e => ({
+            title: e.window.get_title(),
+            wsIndex: e.window.get_workspace()?.index(),
+            ratio: e.widthRatio,
+            index: e.index
+        }));
+        console.log(`[Tiler] tilingArray dump for ws=${workspaceIndex}:`, JSON.stringify(all));
+
+        return this._tilingArray
+            .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
+            .sort((a, b) => a.index - b.index)
+            .map(entry => ({ window: entry.window, widthRatio: entry.widthRatio }));
+    }
+
+    updateWindowRatio(window, newRatio, side) {
+        const wsIndex = window.get_workspace().index();
+        const entries = this._tilingArray
+            .filter(e => e.window.get_workspace().index() === wsIndex)
+            .sort((a, b) => a.index - b.index);
+
+        const targetEntry = entries.find(e => e.window === window);
+        if (!targetEntry) return;
+
+        const oldRatio = targetEntry.widthRatio;
+        const delta = newRatio - oldRatio;
+
+        // Get neighbours based on which side was resized
+        const targetIdx = entries.indexOf(targetEntry);
+        const neighbours = side === 'right'
+            ? entries.slice(targetIdx + 1)
+            : entries.slice(0, targetIdx);
+
+        if (neighbours.length === 0) return;
+
+        const perNeighbour = delta / neighbours.length;
+        targetEntry.widthRatio = newRatio;
+        neighbours.forEach(e => e.widthRatio -= perNeighbour);
+    }
+
     _connectWindowSignals(window) {
-        // Guard against double connecting
         if (this._windowSignals.has(window)) return;
+
+        // Save workspace index now while window is alive
+        let savedWsIndex = window.get_workspace().index();
 
         const signals = [];
 
         signals.push(window.connect('unmanaged', () => {
-            this._removeFromTiling(window);
+            this._removeFromTiling(window, true, savedWsIndex);
             this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
             this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
             const minId = this._minimizedStore.get(window);
@@ -113,22 +189,26 @@ export class WindowTracker extends EventEmitter {
                 this._minimizedStore.delete(window);
             }
             this._disconnectWindowSignals(window);
-            this.emit('window-removed', window);
+            this.emit('window-removed', window, savedWsIndex);
         }));
+
+
+
 
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
-                const entry = this._removeFromTiling(window);
-                if (entry) this._minimizedPositionStore.push(entry); // save position
+                const wsIndex = window.get_workspace().index();
+                const entry = this._removeFromTiling(window, true, wsIndex); // normalize on minimize
+                if (entry) this._minimizedPositionStore.push(entry);
                 this._disconnectWindowSignals(window);
-                this.emit('window-removed', window);
+                this.emit('window-removed', window, wsIndex);
                 this._watchForUnminimize(window);
             }
         }));
 
         signals.push(window.connect('workspace-changed', () => {
-            const wsIndex = window.get_workspace().index();
-            this.emit('window-workspace-changed', window, wsIndex);
+            savedWsIndex = window.get_workspace().index();
+            this.emit('window-workspace-changed', window, savedWsIndex);
         }));
 
         signals.push(window.connect('notify::maximized-horizontally', () => {
@@ -136,18 +216,16 @@ export class WindowTracker extends EventEmitter {
             const wsIndex = window.get_workspace().index();
 
             if (isMaximized) {
-                const entry = this._removeFromTiling(window);
+                const entry = this._removeFromTiling(window, true, wsIndex); 
                 if (!entry) return;
                 this._maximizedStore.push(entry);
-                this.emit('window-removed', window);
+                this.emit('window-removed', window, wsIndex);
                 this.emit('window-maximized', window, wsIndex);
             } else {
                 const stored = this._maximizedStore.find(e => e.window === window);
                 if (stored) {
                     this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
                     this._tilingArray.push(stored);
-
-                    // Mark as recently unmaximized for 1 second
                     this._recentlyUnmaximized.add(window);
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
                         this._recentlyUnmaximized.delete(window);
@@ -177,20 +255,18 @@ export class WindowTracker extends EventEmitter {
                 this._minimizedStore.delete(window);
 
                 if (window.get_maximized() !== 0) {
-                    // Restored to maximized — clean up position store, watch for unmaximize
                     this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
                     this._watchForUnmaximize(window);
                 } else {
-                    // Restore to original tiling position
                     const stored = this._minimizedPositionStore.find(e => e.window === window);
                     if (stored) {
                         this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
                         this._tilingArray.push(stored);
                         this._connectWindowSignals(window);
                         const wsIndex = window.get_workspace().index();
+                        this._normalizeRatios(wsIndex);
                         this.emit('window-added', window, wsIndex);
                     } else {
-                        // No saved position, add as new window
                         this._addToTiling(window);
                     }
                 }

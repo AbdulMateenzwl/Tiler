@@ -1,20 +1,13 @@
 // layoutEngine.js
 
 export class LayoutEngine {
-    /**
-         * Column layout — each window gets an equal vertical strip.
-         * @param {Meta.Window[]} windows
-         * @param {{x, y, width, height}} workArea
-         * @param {number} gap
-         * @returns {{window, x, y, width, height}[]}
-         */
-    static calculateColumns(windows, workArea, gap = 8) {
-        const count = windows.length;
+    static calculateColumns(windowsWithRatios, workArea, gap = 8) {
+        const count = windowsWithRatios.length;
         if (count === 0) return [];
 
         if (count === 1) {
             return [{
-                window: windows[0],
+                window: windowsWithRatios[0].window,
                 x: workArea.x + gap,
                 y: workArea.y + gap,
                 width: workArea.width - gap * 2,
@@ -22,19 +15,29 @@ export class LayoutEngine {
             }];
         }
 
+        // Normalize ratios on the fly so they always fill the available space
+        const totalRatio = windowsWithRatios.reduce((sum, e) => sum + e.widthRatio, 0);
+
         const totalGaps = gap * (count + 1);
-        const colWidth = Math.floor((workArea.width - totalGaps) / count);
+        const availableWidth = workArea.width - totalGaps;
         const colHeight = workArea.height - gap * 2;
 
-        return windows.map((window, i) => ({
-            window,
-            x: workArea.x + gap + i * (colWidth + gap),
-            y: workArea.y + gap,
-            width: colWidth,
-            height: colHeight,
-        }));
-    }
+        let currentX = workArea.x + gap;
 
+        return windowsWithRatios.map(({ window, widthRatio }) => {
+            const normalizedRatio = widthRatio / totalRatio;
+            const colWidth = Math.floor(availableWidth * normalizedRatio);
+            const result = {
+                window,
+                x: Math.floor(currentX),
+                y: workArea.y + gap,
+                width: colWidth,
+                height: colHeight,
+            };
+            currentX += colWidth + gap;
+            return result;
+        });
+    }
     /**
      * Get the work area for a given workspace index.
      */

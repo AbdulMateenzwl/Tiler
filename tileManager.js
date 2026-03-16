@@ -19,8 +19,8 @@ export class TileManager {
             this._scheduleLayout(wsIndex);
         });
 
-        this._tracker.connect('window-removed', () => {
-            const wsIndex = global.workspace_manager.get_active_workspace_index();
+        this._tracker.connect('window-removed', (_, window, wsIndex) => {
+            console.log(`[Tiler] window-removed wsIndex=${wsIndex}`);
             this._scheduleLayout(wsIndex);
         });
 
@@ -54,15 +54,23 @@ export class TileManager {
 
         this._displaySignals.push(
             global.display.connect('grab-op-begin', (display, window, grabOp) => {
+                console.log(`[Tiler] grab-op-begin: grabOp=${grabOp}`);
                 if (this._isMovingGrab(grabOp))
                     this._grabActive = true;
+                if (this._isResizingGrab(grabOp))
+                    this._resizeGrabOp = grabOp;
             })
         );
 
         this._displaySignals.push(
             global.display.connect('grab-op-end', (display, window, grabOp) => {
                 this._grabActive = false;
-                this._onGrabOpEnd(window, grabOp);
+                if (this._isResizingGrab(grabOp)) {
+                    this._onResizeEnd(window, grabOp);
+                    this._resizeGrabOp = null;
+                } else {
+                    this._onGrabOpEnd(window, grabOp);
+                }
             })
         );
     }
@@ -110,9 +118,9 @@ export class TileManager {
     }
 
     _applyLayout(wsIndex) {
-        const windows = this._tracker.getWindowsForWorkspace(wsIndex);
+        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const layout = LayoutEngine.calculateColumns(windows, workArea, 8);
+        const layout = LayoutEngine.calculateColumns(windowsWithRatios, workArea, 8);
 
         layout.forEach(({ window, x, y, width, height }) => {
             if (this._grabActive && window === global.display.focus_window) return;
@@ -174,16 +182,14 @@ export class TileManager {
     }
 
     _onGrabOpEnd(window, grabOp) {
-        console.log(`[Tiler] _onGrabOpEnd: grabOp=${grabOp} isMoving=${this._isMovingGrab(grabOp)}`);
         if (!this._isMovingGrab(grabOp)) return;
 
         const wsIndex = window.get_workspace().index();
-        const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
-        console.log(`[Tiler] _onGrabOpEnd: inTiling=${tiledWindows.some(w => w === window)}`);
-        if (!tiledWindows.some(w => w === window)) return;
+        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
+        if (!windowsWithRatios.some(e => e.window === window)) return;
 
         const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const layout = LayoutEngine.calculateColumns(tiledWindows, workArea, 8);
+        const layout = LayoutEngine.calculateColumns(windowsWithRatios, workArea, 8);
         const target = layout.find(l => l.window === window);
         if (!target) return;
 
@@ -193,6 +199,43 @@ export class TileManager {
     _isMovingGrab(grabOp) {
         return grabOp === Meta.GrabOp.MOVING ||
             grabOp === Meta.GrabOp.KEYBOARD_MOVING ||
-            grabOp === 1025; 
+            grabOp === 1025;
     }
+
+    _isResizingGrab(grabOp) {
+        return [
+            4097, 8193, 36865, 20481, 40961, 24577, // mouse resize
+            5121, 9217, 37889, 21505, 41985, 25601  // Super+mouse resize
+        ].includes(grabOp);
+    }
+
+    _isLeftResize(grabOp) {
+        return [4097, 36865, 20481, 5121, 37889, 21505].includes(grabOp);
+    }
+
+    _isRightResize(grabOp) {
+        return [8193, 40961, 24577, 9217, 41985, 25601].includes(grabOp);
+    }
+
+    _onResizeEnd(window, grabOp) {
+        const wsIndex = window.get_workspace().index();
+        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
+        if (!windowsWithRatios.some(e => e.window === window)) return;
+
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const totalGaps = 8 * (windowsWithRatios.length + 1);
+        const availableWidth = workArea.width - totalGaps;
+
+        const frame = window.get_frame_rect();
+        const newRatio = frame.width / availableWidth;
+
+        let side = null;
+        if (this._isRightResize(grabOp)) side = 'right';
+        else if (this._isLeftResize(grabOp)) side = 'left';
+        else return; // neither left nor right, ignore
+
+        this._tracker.updateWindowRatio(window, newRatio, side);
+        this._applyLayout(wsIndex);
+    }
+
 }
