@@ -132,18 +132,20 @@ export class WindowTracker extends EventEmitter {
     }
 
     getWindowsWithRatiosForWorkspace(workspaceIndex) {
-        const all = this._tilingArray.map(e => ({
-            title: e.window.get_title(),
-            wsIndex: e.window.get_workspace()?.index(),
-            ratio: e.widthRatio,
-            index: e.index
-        }));
-        console.log(`[Tiler] tilingArray dump for ws=${workspaceIndex}:`, JSON.stringify(all));
-
-        return this._tilingArray
+        const entries = this._tilingArray
             .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
-            .sort((a, b) => a.index - b.index)
-            .map(entry => ({ window: entry.window, widthRatio: entry.widthRatio }));
+            .sort((a, b) => a.index - b.index);
+
+        if (entries.length === 0) return [];
+
+        // Always normalize before returning so ratios are guaranteed to sum to 1
+        const sum = entries.reduce((acc, e) => acc + e.widthRatio, 0);
+        const normalizedEntries = entries.map(e => ({
+            window: e.window,
+            widthRatio: sum > 0 ? e.widthRatio / sum : 1 / entries.length
+        }));
+
+        return normalizedEntries;
     }
 
     updateWindowRatio(window, newRatio, side) {
@@ -216,7 +218,7 @@ export class WindowTracker extends EventEmitter {
             const wsIndex = window.get_workspace().index();
 
             if (isMaximized) {
-                const entry = this._removeFromTiling(window, true, wsIndex); 
+                const entry = this._removeFromTiling(window, true, wsIndex);
                 if (!entry) return;
                 this._maximizedStore.push(entry);
                 this.emit('window-removed', window, wsIndex);
@@ -296,6 +298,13 @@ export class WindowTracker extends EventEmitter {
                 this._watchForUnmaximize(window);
             }
             return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    commitRatios(windowsWithRatios) {
+        windowsWithRatios.forEach(({ window, widthRatio }) => {
+            const entry = this._tilingArray.find(e => e.window === window);
+            if (entry) entry.widthRatio = widthRatio;
         });
     }
 }

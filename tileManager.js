@@ -15,6 +15,11 @@ export class TileManager {
     enable() {
         this._grabActive = false;
 
+        this._liveResizeSignal = null;
+
+        this._isResizing = false;
+        this._lastTempRatios = null;
+
         this._tracker.connect('window-added', (_, window, wsIndex) => {
             this._scheduleLayout(wsIndex);
         });
@@ -54,11 +59,12 @@ export class TileManager {
 
         this._displaySignals.push(
             global.display.connect('grab-op-begin', (display, window, grabOp) => {
-                console.log(`[Tiler] grab-op-begin: grabOp=${grabOp}`);
                 if (this._isMovingGrab(grabOp))
                     this._grabActive = true;
-                if (this._isResizingGrab(grabOp))
+                if (this._isResizingGrab(grabOp)) {
                     this._resizeGrabOp = grabOp;
+                    this._startLiveResize(window, grabOp);
+                }
             })
         );
 
@@ -66,6 +72,7 @@ export class TileManager {
             global.display.connect('grab-op-end', (display, window, grabOp) => {
                 this._grabActive = false;
                 if (this._isResizingGrab(grabOp)) {
+                    this._stopLiveResize();
                     this._onResizeEnd(window, grabOp);
                     this._resizeGrabOp = null;
                 } else {
@@ -86,9 +93,78 @@ export class TileManager {
             GLib.source_remove(id);
         }
         this._layoutTimers.clear();
+
+        this._stopLiveResize();
+    }
+
+    _startLiveResize(window, grabOp) {
+        this._stopLiveResize();
+        this._isResizing = true;
+        const wsIndex = window.get_workspace().index();
+        const side = this._isRightResize(grabOp) ? 'right' : 'left';
+
+        const snapshot = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex)
+            .map(e => ({ window: e.window, widthRatio: e.widthRatio }));
+
+        // Store last computed temp ratios so _onResizeEnd can commit them
+        this._lastTempRatios = null;
+
+        this._liveResizeSignal = {
+            window,
+            wsIndex,
+            side,
+            snapshot,
+            id: window.connect('size-changed', () => {
+                const workArea = LayoutEngine.getWorkArea(wsIndex);
+                const totalGaps = 8 * (snapshot.length + 1);
+                const availableWidth = workArea.width - totalGaps;
+
+                const frame = window.get_frame_rect();
+                const newRatio = frame.width / availableWidth;
+
+                const targetIdx = snapshot.findIndex(e => e.window === window);
+                if (targetIdx === -1) return;
+
+                const oldRatio = snapshot[targetIdx].widthRatio;
+                const delta = newRatio - oldRatio;
+
+                const neighbours = side === 'right'
+                    ? snapshot.slice(targetIdx + 1)
+                    : snapshot.slice(0, targetIdx);
+
+                if (neighbours.length === 0) return;
+
+                const perNeighbour = delta / neighbours.length;
+
+                const tempRatios = snapshot.map(e => {
+                    if (e.window === window) return { window: e.window, widthRatio: newRatio };
+                    const isNeighbour = neighbours.some(n => n.window === e.window);
+                    if (isNeighbour) return { window: e.window, widthRatio: e.widthRatio - perNeighbour };
+                    return { window: e.window, widthRatio: e.widthRatio };
+                });
+
+                // Save last temp ratios for commit on resize end
+                this._lastTempRatios = tempRatios;
+
+                const layout = LayoutEngine.calculateColumns(tempRatios, workArea, 8);
+                layout.forEach(({ window: w, x, y, width, height }) => {
+                    if (w === window) return;
+                    this._moveWindow(w, x, y, width, height);
+                });
+            })
+        };
+    }
+
+    _stopLiveResize() {
+        this._isResizing = false;
+        if (this._liveResizeSignal) {
+            this._liveResizeSignal.window.disconnect(this._liveResizeSignal.id);
+            this._liveResizeSignal = null;
+        }
     }
 
     _scheduleLayout(wsIndex) {
+        if (this._isResizing) return;
         if (this._layoutTimers.has(wsIndex)) {
             GLib.source_remove(this._layoutTimers.get(wsIndex));
             this._layoutTimers.delete(wsIndex);
@@ -219,22 +295,13 @@ export class TileManager {
 
     _onResizeEnd(window, grabOp) {
         const wsIndex = window.get_workspace().index();
-        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
-        if (!windowsWithRatios.some(e => e.window === window)) return;
 
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const totalGaps = 8 * (windowsWithRatios.length + 1);
-        const availableWidth = workArea.width - totalGaps;
+        // Commit the last temp ratios from live resize
+        if (this._lastTempRatios) {
+            this._tracker.commitRatios(this._lastTempRatios);
+            this._lastTempRatios = null;
+        }
 
-        const frame = window.get_frame_rect();
-        const newRatio = frame.width / availableWidth;
-
-        let side = null;
-        if (this._isRightResize(grabOp)) side = 'right';
-        else if (this._isLeftResize(grabOp)) side = 'left';
-        else return; // neither left nor right, ignore
-
-        this._tracker.updateWindowRatio(window, newRatio, side);
         this._applyLayout(wsIndex);
     }
 
