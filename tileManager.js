@@ -97,62 +97,240 @@ export class TileManager {
         this._stopLiveResize();
     }
 
-    _startLiveResize(window, grabOp) {
-        this._stopLiveResize();
-        this._isResizing = true;
-        const wsIndex = window.get_workspace().index();
-        const side = this._isRightResize(grabOp) ? 'right' : 'left';
+    _startCornerResize(window, grabOp, root, innerRect, wsIndex) {
+        const hSide = this._cornerHorizontalSide(grabOp);
+        const vSide = this._cornerVerticalSide(grabOp);
 
-        const snapshot = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex)
-            .map(e => ({ window: e.window, widthRatio: e.widthRatio }));
+        const leaf = this._tracker._tree.findLeaf(window, root);
+        if (!leaf) return;
 
-        // Store last computed temp ratios so _onResizeEnd can commit them
-        this._lastTempRatios = null;
+        const hParent = this._findParentWithDirection(leaf, root, 'horizontal');
+        const vParent = this._findParentWithDirection(leaf, root, 'vertical');
+
+        const hTargetChild = hParent ? this._findDirectChildContaining(hParent, leaf) : null;
+        const vTargetChild = vParent ? this._findDirectChildContaining(vParent, leaf) : null;
+
+        const hSnapshot = hParent ? hParent.children
+            .filter(c => c.ratio > 0)
+            .map(c => ({ node: c, ratio: c.ratio, isTarget: c === hTargetChild }))
+            : null;
+
+        const vSnapshot = vParent ? vParent.children
+            .filter(c => c.ratio > 0)
+            .map(c => ({ node: c, ratio: c.ratio, isTarget: c === vTargetChild }))
+            : null;
+
+        const hParentLayout = hParent ? this._getContainerRect(hParent, root, innerRect) : null;
+        const vParentLayout = vParent ? this._getContainerRect(vParent, root, innerRect) : null;
+
+        const hAvailable = hParentLayout ? hParentLayout.width - 8 * ((hSnapshot?.length ?? 1) - 1) : 0;
+        const vAvailable = vParentLayout ? vParentLayout.height - 8 * ((vSnapshot?.length ?? 1) - 1) : 0;
 
         this._liveResizeSignal = {
             window,
-            wsIndex,
-            side,
-            snapshot,
             id: window.connect('size-changed', () => {
-                const workArea = LayoutEngine.getWorkArea(wsIndex);
-                const totalGaps = 8 * (snapshot.length + 1);
-                const availableWidth = workArea.width - totalGaps;
-
                 const frame = window.get_frame_rect();
-                const newRatio = frame.width / availableWidth;
 
-                const targetIdx = snapshot.findIndex(e => e.window === window);
+                // Apply both horizontal and vertical temp ratios simultaneously
+                if (hSnapshot && hAvailable > 0) {
+                    const newHRatio = frame.width / hAvailable;
+                    this._applySnapshotResize(hSnapshot, newHRatio, hSide);
+                }
+
+                if (vSnapshot && vAvailable > 0) {
+                    const newVRatio = frame.height / vAvailable;
+                    this._applySnapshotResize(vSnapshot, newVRatio, vSide);
+                }
+
+                // Save temp ratios for commit
+                this._lastTempRatios = [
+                    ...(hSnapshot?.map(e => ({ nodeId: e.node.id, ratio: e.node.ratio })) ?? []),
+                    ...(vSnapshot?.map(e => ({ nodeId: e.node.id, ratio: e.node.ratio })) ?? []),
+                ];
+
+                // Single full layout recalculation with both axes applied
+                const layout = LayoutEngine.calculate(root, innerRect, 8);
+
+                // Move all windows except the dragged one
+                layout.forEach(({ window: w, x, y, width, height }) => {
+                    if (w === window) return;
+                    this._moveWindow(w, x, y, width, height);
+                });
+
+                // Restore both snapshots
+                hSnapshot?.forEach(e => e.node.ratio = e.ratio);
+                vSnapshot?.forEach(e => e.node.ratio = e.ratio);
+            })
+        };
+    }
+
+    _applySnapshotResize(snapshot, newRatio, side) {
+        const targetIdx = snapshot.findIndex(e => e.isTarget);
+        if (targetIdx === -1) return;
+
+        const oldRatio = snapshot[targetIdx].ratio;
+        const delta = newRatio - oldRatio;
+
+        const neighbours = (side === 'right' || side === 'bottom')
+            ? snapshot.slice(targetIdx + 1)
+            : snapshot.slice(0, targetIdx);
+
+        if (neighbours.length === 0) return;
+
+        const perNeighbour = delta / neighbours.length;
+        snapshot[targetIdx].node.ratio = newRatio;
+        neighbours.forEach(e => e.node.ratio = e.ratio - perNeighbour);
+    }
+
+    _findParentWithDirection(node, root, direction) {
+        const parent = this._tracker._tree.findParent(node.id, root);
+        if (!parent) return null;
+        if (parent.direction === direction) return parent;
+        return this._findParentWithDirection(parent, root, direction);
+    }
+
+    _isAncestorOf(node, leaf) {
+        if (node.type === 'leaf') return false;
+        for (const child of node.children) {
+            if (child === leaf) return true;
+            if (this._isAncestorOf(child, leaf)) return true;
+        }
+        return false;
+    }
+
+    _startLiveResize(window, grabOp) {
+        this._stopLiveResize();
+        this._isResizing = true;
+        this._lastTempRatios = null;
+
+        const wsIndex = window.get_workspace().index();
+        const isVertical = this._isTopResize(grabOp) || this._isBottomResize(grabOp);
+        const side = this._isRightResize(grabOp) ? 'right'
+            : this._isLeftResize(grabOp) ? 'left'
+                : this._isBottomResize(grabOp) ? 'bottom'
+                    : 'top';
+
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const innerRect = {
+            x: workArea.x + 8, y: workArea.y + 8,
+            width: workArea.width - 16, height: workArea.height - 16,
+        };
+
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+
+        if (this._isCornerResize(grabOp)) {
+            this._startCornerResize(window, grabOp, root, innerRect, wsIndex);
+            return;
+        }
+
+        const leaf = this._tracker._tree.findLeaf(window, root);
+        console.log(`[Tiler] startLiveResize: "${window.get_title()}" grabOp=${grabOp} isVertical=${isVertical} side=${side}`);
+        console.log(`[Tiler] leaf found=${!!leaf}`);
+
+        const expectedDirection = isVertical ? 'vertical' : 'horizontal';
+        const parent = this._findParentWithDirection(leaf, root, expectedDirection);
+        console.log(`[Tiler] parent found=${!!parent} direction=${parent?.direction}`);
+
+        const targetChild = parent ? this._findDirectChildContaining(parent, leaf) : null;
+        console.log(`[Tiler] targetChild=${targetChild?.type} id=${targetChild?.id}`);
+
+        console.log(`[Tiler] liveResize: "${window.get_title()}" side=${side} parent=${parent?.direction} targetChild=${targetChild?.type} siblings=${parent?.children.filter(c => c.ratio > 0).length}`);
+
+        const siblingsSnapshot = parent?.children
+            .filter(c => c.ratio > 0)
+            .map(c => ({ node: c, ratio: c.ratio, isTarget: c === targetChild }));
+        console.log(`[Tiler] siblings=${siblingsSnapshot?.length} target in siblings=${siblingsSnapshot?.some(s => s.isTarget)}`);
+
+        const parentLayout = this._getContainerRect(parent, root, innerRect);
+        if (!parentLayout) return;
+
+        const totalGaps = 8 * (siblingsSnapshot.length - 1);
+        const availableSize = isVertical
+            ? parentLayout.height - totalGaps
+            : parentLayout.width - totalGaps;
+
+        this._liveResizeSignal = {
+            window,
+            id: window.connect('size-changed', () => {
+                const frame = window.get_frame_rect();
+                const newRatio = (isVertical ? frame.height : frame.width) / availableSize;
+
+                const targetIdx = siblingsSnapshot.findIndex(e => e.isTarget);
                 if (targetIdx === -1) return;
 
-                const oldRatio = snapshot[targetIdx].widthRatio;
+                const oldRatio = siblingsSnapshot[targetIdx].ratio;
                 const delta = newRatio - oldRatio;
 
-                const neighbours = side === 'right'
-                    ? snapshot.slice(targetIdx + 1)
-                    : snapshot.slice(0, targetIdx);
+                const neighbours = (side === 'right' || side === 'bottom')
+                    ? siblingsSnapshot.slice(targetIdx + 1)
+                    : siblingsSnapshot.slice(0, targetIdx);
 
                 if (neighbours.length === 0) return;
 
                 const perNeighbour = delta / neighbours.length;
 
-                const tempRatios = snapshot.map(e => {
-                    if (e.window === window) return { window: e.window, widthRatio: newRatio };
-                    const isNeighbour = neighbours.some(n => n.window === e.window);
-                    if (isNeighbour) return { window: e.window, widthRatio: e.widthRatio - perNeighbour };
-                    return { window: e.window, widthRatio: e.widthRatio };
+                siblingsSnapshot.forEach(e => {
+                    if (e.isTarget) {
+                        e.node.ratio = newRatio;
+                    } else if (neighbours.some(n => n === e)) {
+                        e.node.ratio = e.ratio - perNeighbour;
+                    }
                 });
 
-                // Save last temp ratios for commit on resize end
-                this._lastTempRatios = tempRatios;
+                this._lastTempRatios = siblingsSnapshot.map(e => ({
+                    nodeId: e.node.id,
+                    ratio: e.node.ratio,
+                }));
 
-                const layout = LayoutEngine.calculateColumns(tempRatios, workArea, 8);
-                layout.forEach(({ window: w, x, y, width, height }) => {
+                // Only recalculate and move windows inside the resizing container
+                const containerLayout = LayoutEngine.calculate(parent,
+                    this._getContainerRect(parent, root, innerRect), 8);
+
+                containerLayout.forEach(({ window: w, x, y, width, height }) => {
                     if (w === window) return;
                     this._moveWindow(w, x, y, width, height);
                 });
+
+                siblingsSnapshot.forEach(e => e.node.ratio = e.ratio);
             })
         };
+    }
+
+    _findDirectChildContaining(parent, leaf) {
+        for (const child of parent.children) {
+            if (child === leaf) return child;
+            if (child.type === 'container') {
+                // Check if leaf is inside this container
+                if (this._tracker._tree.findNodeById(leaf.id, child)) return child;
+            }
+        }
+        return null;
+    }
+
+    _getContainerRect(container, root, innerRect) {
+        // Calculate layout and find bounds of this container's children
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const children = [];
+        this._collectLayoutForContainer(container, layout, children);
+        if (children.length === 0) return null;
+
+        const minX = Math.min(...children.map(l => l.x));
+        const maxX = Math.max(...children.map(l => l.x + l.width));
+        const minY = Math.min(...children.map(l => l.y));
+        const maxY = Math.max(...children.map(l => l.y + l.height));
+
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    _collectLayoutForContainer(container, layout, results) {
+        if (container.type === 'leaf') {
+            const found = layout.find(l => l.window === container.window);
+            if (found) results.push(found);
+            return;
+        }
+        for (const child of container.children) {
+            this._collectLayoutForContainer(child, layout, results);
+        }
     }
 
     _stopLiveResize() {
@@ -182,21 +360,29 @@ export class TileManager {
     _onFocusChanged() {
         const focused = global.display.focus_window;
         if (!focused) return;
-
-        if (focused.get_maximized() !== 0) return;
+        console.log(`[Tiler] focus changed to: "${focused.get_title()}" maximized=${focused.get_maximized()}`);
 
         const wsIndex = focused.get_workspace().index();
         const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
+        console.log(`[Tiler] tiled windows: ${tiledWindows.map(w => w.get_title())}`);
 
         if (!tiledWindows.some(w => w === focused)) return;
-
         this._raiseTiledWindows(wsIndex);
     }
 
     _applyLayout(wsIndex) {
-        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
+        const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const layout = LayoutEngine.calculateColumns(windowsWithRatios, workArea, 8);
+
+        // Add outer gap
+        const innerRect = {
+            x: workArea.x + 8,
+            y: workArea.y + 8,
+            width: workArea.width - 16,
+            height: workArea.height - 16,
+        };
+
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
 
         layout.forEach(({ window, x, y, width, height }) => {
             if (this._grabActive && window === global.display.focus_window) return;
@@ -261,11 +447,17 @@ export class TileManager {
         if (!this._isMovingGrab(grabOp)) return;
 
         const wsIndex = window.get_workspace().index();
-        const windowsWithRatios = this._tracker.getWindowsWithRatiosForWorkspace(wsIndex);
-        if (!windowsWithRatios.some(e => e.window === window)) return;
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const windows = this._tracker.getWindowsForWorkspace(wsIndex);
+        if (!windows.some(w => w === window)) return;
 
         const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const layout = LayoutEngine.calculateColumns(windowsWithRatios, workArea, 8);
+        const innerRect = {
+            x: workArea.x + 8, y: workArea.y + 8,
+            width: workArea.width - 16, height: workArea.height - 16,
+        };
+
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
         const target = layout.find(l => l.window === window);
         if (!target) return;
 
@@ -280,9 +472,19 @@ export class TileManager {
 
     _isResizingGrab(grabOp) {
         return [
-            4097, 8193, 36865, 20481, 40961, 24577, // mouse resize
-            5121, 9217, 37889, 21505, 41985, 25601  // Super+mouse resize
+            4097, 8193, 36865, 20481, 40961, 24577,  // mouse horizontal resize
+            5121, 9217, 37889, 21505, 41985, 25601,  // Super+mouse horizontal resize
+            32769, 16385,                              // mouse vertical resize (top, bottom)
+            33793, 17409                               // Super+mouse vertical resize (top, bottom)
         ].includes(grabOp);
+    }
+
+    _isTopResize(grabOp) {
+        return [32769, 33793].includes(grabOp);
+    }
+
+    _isBottomResize(grabOp) {
+        return [16385, 17409].includes(grabOp);
     }
 
     _isLeftResize(grabOp) {
@@ -293,12 +495,33 @@ export class TileManager {
         return [8193, 40961, 24577, 9217, 41985, 25601].includes(grabOp);
     }
 
+    _isCornerResize(grabOp) {
+        return [36865, 20481, 40961, 24577, 37889, 21505, 41985, 25601].includes(grabOp);
+    }
+
+    _cornerHorizontalSide(grabOp) {
+        // left corners
+        if ([36865, 20481, 37889, 21505].includes(grabOp)) return 'left';
+        // right corners
+        return 'right';
+    }
+
+    _cornerVerticalSide(grabOp) {
+        // top corners
+        if ([36865, 40961, 37889, 41985].includes(grabOp)) return 'top';
+        // bottom corners
+        return 'bottom';
+    }
+
     _onResizeEnd(window, grabOp) {
         const wsIndex = window.get_workspace().index();
 
-        // Commit the last temp ratios from live resize
         if (this._lastTempRatios) {
-            this._tracker.commitRatios(this._lastTempRatios);
+            const root = this._tracker.getRootForWorkspace(wsIndex);
+            this._lastTempRatios.forEach(({ nodeId, ratio }) => {
+                const node = this._tracker._tree.findNodeById(nodeId, root);
+                if (node && node.ratio > 0) node.ratio = ratio;
+            });
             this._lastTempRatios = null;
         }
 

@@ -2,15 +2,15 @@
 import Meta from 'gi://Meta';
 import GLib from 'gi://GLib';
 import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
+import { ContainerTree } from './containerTree.js';
 
 export class WindowTracker extends EventEmitter {
     constructor() {
         super();
-        this._tilingArray = [];
-        this._maximizedStore = [];
-        this._minimizedStore = new Map();
-        this._minimizedPositionStore = [];
-        this._nextIndex = 1;
+        this._tree = new ContainerTree();
+        this._maximizedWindows = new Set(); // windows currently maximized
+        this._minimizedWindows = new Set(); // windows currently minimized
+        this._minimizedStore = new Map();   // window -> unminimize signal id
         this._windowSignals = new Map();
         this._displaySignals = [];
         this._recentlyUnmaximized = new Set();
@@ -42,149 +42,60 @@ export class WindowTracker extends EventEmitter {
             window.disconnect(id);
         }
         this._minimizedStore.clear();
-        this._minimizedPositionStore = [];
-
-        this._tilingArray = [];
-        this._maximizedStore = [];
-        this._nextIndex = 1;
+        this._maximizedWindows.clear();
+        this._minimizedWindows.clear();
+        this._recentlyUnmaximized.clear();
     }
 
-    _assignInitialRatio(wsIndex) {
-        const entries = this._tilingArray.filter(e => e.window.get_workspace().index() === wsIndex);
-        const count = entries.length;
-        if (count === 0) return;
-        const equal = 1.0 / count;
-        entries.forEach(e => e.widthRatio = equal);
+    getWindowsForWorkspace(wsIndex) {
+        return this._tree.getWindows(wsIndex);
     }
 
-    _normalizeRatios(wsIndex) {
-        const entries = this._tilingArray.filter(e => e.window.get_workspace().index() === wsIndex);
-        if (entries.length === 0) return;
+    getRootForWorkspace(wsIndex) {
+        return this._tree.getRoot(wsIndex);
+    }
 
-        const sum = entries.reduce((acc, e) => acc + e.widthRatio, 0);
-        if (sum === 0) {
-            // Fallback to equal ratios if sum is 0
-            const equal = 1.0 / entries.length;
-            entries.forEach(e => e.widthRatio = equal);
-            return;
-        }
-
-        entries.forEach(e => e.widthRatio = e.widthRatio / sum);
+    setPendingSplit(wsIndex, direction) {
+        this._tree.setPendingSplit(wsIndex, direction);
     }
 
     wasRecentlyUnmaximized(window) {
         return this._recentlyUnmaximized.has(window);
     }
 
-    getWindowsForWorkspace(workspaceIndex) {
-        return this._tilingArray
-            .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
-            .sort((a, b) => a.index - b.index)
-            .map(entry => entry.window);
-    }
-
     _shouldTrack(window) {
-        if (window.get_window_type() !== Meta.WindowType.NORMAL)
-            return false;
-        if (window.is_skip_taskbar())
-            return false;
-        if (window.minimized)
-            return false;
-        if (window.get_maximized() !== 0)
-            return false;
+        if (window.get_window_type() !== Meta.WindowType.NORMAL) return false;
+        if (window.is_skip_taskbar()) return false;
+        if (window.minimized) return false;
+        if (window.get_maximized() !== 0) return false;
         return true;
     }
 
-    _generateId(window) {
-        return `${window.get_pid()}-${window.get_id()}`;
-    }
+    _addToTiling(window) {
+        const wsIndex = window.get_workspace().index();
+        if (this._tree.findLeaf(window, null, wsIndex)) return;
 
-    _addToTiling(window, index = null) {
-        if (this._tilingArray.some(e => e.window === window)) return;
+        const focusedWindow = global.display.focus_window;
+        const focused = focusedWindow !== window ? focusedWindow : null;
 
-        const assignedIndex = index !== null ? index : this._nextIndex++;
-        const id = this._generateId(window);
-
-        this._tilingArray.push({ index: assignedIndex, id, window, widthRatio: 0 });
+        this._tree.insertWindow(window, wsIndex, focused);
         this._connectWindowSignals(window);
-
-        const wsIndex = window.get_workspace().index();
-        // Reassign equal ratios to all windows on this workspace
-        this._assignInitialRatio(wsIndex);
-
         this.emit('window-added', window, wsIndex);
-    }
-
-    _removeFromTiling(window, normalize = true, wsIndex = null) {
-        const i = this._tilingArray.findIndex(e => e.window === window);
-        if (i === -1) return null;
-        const [entry] = this._tilingArray.splice(i, 1);
-
-        if (normalize) {
-            const idx = wsIndex ?? (() => {
-                try { return entry.window.get_workspace()?.index(); } catch { return null; }
-            })();
-            if (idx !== null && idx !== undefined)
-                this._normalizeRatios(idx);
-        }
-
-        return entry;
-    }
-
-    getWindowsWithRatiosForWorkspace(workspaceIndex) {
-        const entries = this._tilingArray
-            .filter(entry => entry.window.get_workspace().index() === workspaceIndex)
-            .sort((a, b) => a.index - b.index);
-
-        if (entries.length === 0) return [];
-
-        // Always normalize before returning so ratios are guaranteed to sum to 1
-        const sum = entries.reduce((acc, e) => acc + e.widthRatio, 0);
-        const normalizedEntries = entries.map(e => ({
-            window: e.window,
-            widthRatio: sum > 0 ? e.widthRatio / sum : 1 / entries.length
-        }));
-
-        return normalizedEntries;
-    }
-
-    updateWindowRatio(window, newRatio, side) {
-        const wsIndex = window.get_workspace().index();
-        const entries = this._tilingArray
-            .filter(e => e.window.get_workspace().index() === wsIndex)
-            .sort((a, b) => a.index - b.index);
-
-        const targetEntry = entries.find(e => e.window === window);
-        if (!targetEntry) return;
-
-        const oldRatio = targetEntry.widthRatio;
-        const delta = newRatio - oldRatio;
-
-        // Get neighbours based on which side was resized
-        const targetIdx = entries.indexOf(targetEntry);
-        const neighbours = side === 'right'
-            ? entries.slice(targetIdx + 1)
-            : entries.slice(0, targetIdx);
-
-        if (neighbours.length === 0) return;
-
-        const perNeighbour = delta / neighbours.length;
-        targetEntry.widthRatio = newRatio;
-        neighbours.forEach(e => e.widthRatio -= perNeighbour);
     }
 
     _connectWindowSignals(window) {
         if (this._windowSignals.has(window)) return;
 
-        // Save workspace index now while window is alive
         let savedWsIndex = window.get_workspace().index();
-
         const signals = [];
 
         signals.push(window.connect('unmanaged', () => {
-            this._removeFromTiling(window, true, savedWsIndex);
-            this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
-            this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
+            console.log(`[Tiler] unmanaged: "${window.get_title()}" ws=${savedWsIndex}`);
+            console.log(`[Tiler] tree before: ${JSON.stringify(this._tree.getWindows(savedWsIndex).map(w => w.get_title()))}`);
+            this._tree.removeWindow(window, savedWsIndex);
+            console.log(`[Tiler] tree after: ${JSON.stringify(this._tree.getWindows(savedWsIndex).map(w => w.get_title()))}`);
+            this._maximizedWindows.delete(window);
+            this._minimizedWindows.delete(window);
             const minId = this._minimizedStore.get(window);
             if (minId) {
                 window.disconnect(minId);
@@ -194,23 +105,33 @@ export class WindowTracker extends EventEmitter {
             this.emit('window-removed', window, savedWsIndex);
         }));
 
-
-
-
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
                 const wsIndex = window.get_workspace().index();
-                const entry = this._removeFromTiling(window, true, wsIndex); // normalize on minimize
-                if (entry) this._minimizedPositionStore.push(entry);
-                this._disconnectWindowSignals(window);
+
+                if (this._maximizedWindows.has(window)) {
+                    // Already collapsed from maximize — just watch for restore
+                    // Don't call collapseNode again or savedRatio gets corrupted
+                    this._minimizedWindows.add(window);
+                    this.emit('window-removed', window, wsIndex);
+                    this._disconnectWindowSignals(window);
+                    this._watchForUnminimize(window);
+                    return;
+                }
+
+                this._minimizedWindows.add(window);
+                this._tree.collapseNode(window, wsIndex);
                 this.emit('window-removed', window, wsIndex);
+                this._disconnectWindowSignals(window);
                 this._watchForUnminimize(window);
             }
         }));
 
         signals.push(window.connect('workspace-changed', () => {
-            savedWsIndex = window.get_workspace().index();
-            this.emit('window-workspace-changed', window, savedWsIndex);
+            const newWsIndex = window.get_workspace().index();
+            this._tree.moveToWorkspace(window, savedWsIndex, newWsIndex);
+            this.emit('window-workspace-changed', window, newWsIndex);
+            savedWsIndex = newWsIndex;
         }));
 
         signals.push(window.connect('notify::maximized-horizontally', () => {
@@ -218,16 +139,19 @@ export class WindowTracker extends EventEmitter {
             const wsIndex = window.get_workspace().index();
 
             if (isMaximized) {
-                const entry = this._removeFromTiling(window, true, wsIndex);
-                if (!entry) return;
-                this._maximizedStore.push(entry);
+                this._maximizedWindows.add(window);
+
+                // Collapse node — keeps leaf but zeroes ratio
+                this._tree.collapseNode(window, wsIndex);
                 this.emit('window-removed', window, wsIndex);
                 this.emit('window-maximized', window, wsIndex);
             } else {
-                const stored = this._maximizedStore.find(e => e.window === window);
-                if (stored) {
-                    this._maximizedStore = this._maximizedStore.filter(e => e.window !== window);
-                    this._tilingArray.push(stored);
+                if (this._maximizedWindows.has(window)) {
+                    this._maximizedWindows.delete(window);
+
+                    // Restore node — restores ratio and renormalizes
+                    this._tree.restoreNode(window, wsIndex);
+
                     this._recentlyUnmaximized.add(window);
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
                         this._recentlyUnmaximized.delete(window);
@@ -255,21 +179,36 @@ export class WindowTracker extends EventEmitter {
             if (!window.minimized) {
                 window.disconnect(id);
                 this._minimizedStore.delete(window);
+                this._minimizedWindows.delete(window);
 
                 if (window.get_maximized() !== 0) {
-                    this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
-                    this._watchForUnmaximize(window);
-                } else {
-                    const stored = this._minimizedPositionStore.find(e => e.window === window);
-                    if (stored) {
-                        this._minimizedPositionStore = this._minimizedPositionStore.filter(e => e.window !== window);
-                        this._tilingArray.push(stored);
+                    // Restored to maximized state
+                    // If it was already tracked as maximized, just reconnect signals
+                    if (this._maximizedWindows.has(window)) {
                         this._connectWindowSignals(window);
-                        const wsIndex = window.get_workspace().index();
-                        this._normalizeRatios(wsIndex);
-                        this.emit('window-added', window, wsIndex);
                     } else {
-                        this._addToTiling(window);
+                        this._watchForUnmaximize(window);
+                    }
+                } else {
+                    // Restored to normal — restore node in tree
+                    const wsIndex = window.get_workspace().index();
+                    // If it was previously maximized, it's already in tree with ratio=0
+                    // restoreNode will bring it back
+                    if (this._maximizedWindows.has(window)) {
+                        this._maximizedWindows.delete(window);
+                        this._tree.restoreNode(window, wsIndex);
+                        this._connectWindowSignals(window);
+                        this._recentlyUnmaximized.add(window);
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                            this._recentlyUnmaximized.delete(window);
+                            return GLib.SOURCE_REMOVE;
+                        });
+                        this.emit('window-added', window, wsIndex);
+                        this.emit('window-unmaximized', window, wsIndex);
+                    } else {
+                        this._tree.restoreNode(window, wsIndex);
+                        this._connectWindowSignals(window);
+                        this.emit('window-added', window, wsIndex);
                     }
                 }
             }
@@ -298,13 +237,6 @@ export class WindowTracker extends EventEmitter {
                 this._watchForUnmaximize(window);
             }
             return GLib.SOURCE_REMOVE;
-        });
-    }
-
-    commitRatios(windowsWithRatios) {
-        windowsWithRatios.forEach(({ window, widthRatio }) => {
-            const entry = this._tilingArray.find(e => e.window === window);
-            if (entry) entry.widthRatio = widthRatio;
         });
     }
 }

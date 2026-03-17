@@ -5,5 +5,13 @@
             <default>['&lt;Super&gt;&lt;Alt&gt;t']</default>
             <summary>Retile all windows</summary>
         </key>
+        <key name="split-horizontal" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;h']</default>
+            <summary>Split next window horizontally</summary>
+        </key>
+        <key name="split-vertical" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;v']</default>
+            <summary>Split next window vertically</summary>
+        </key>
     </schema>
 </schemalist>

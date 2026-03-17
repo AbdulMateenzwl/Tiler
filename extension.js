@@ -13,7 +13,7 @@ export default class TilerExtension extends Extension {
         this._tileManager = new TileManager(this._tracker);
         this._tileManager.enable();
 
-        this._keybindings = new Keybindings(this._tileManager, settings);
+        this._keybindings = new Keybindings(this._tileManager, this._tracker, settings);
         this._keybindings.enable();
     }
 
