@@ -54,6 +54,13 @@ export class WindowTracker extends EventEmitter {
         this._minimizedWindows.clear();
         this._recentlyUnmaximized.clear();
         this._floatingWindows.clear();
+
+        if (this._floatingSignals) {
+            for (const [window, signals] of this._floatingSignals) {
+                signals.forEach(id => window.disconnect(id));
+            }
+            this._floatingSignals.clear();
+        }
     }
 
     getWindowsForWorkspace(wsIndex) {
@@ -84,13 +91,24 @@ export class WindowTracker extends EventEmitter {
         const wsIndex = window.get_workspace().index();
 
         if (this._floatingWindows.has(window)) {
-            // Restore to tiling
+            // Window is floating — retile it
             this._floatingWindows.delete(window);
+
+            // Clean up floating signals
+            const sigs = this._floatingSignals?.get(window);
+            if (sigs) {
+                sigs.forEach(id => window.disconnect(id));
+                this._floatingSignals.delete(window);
+            }
+
             this._tree.restoreNode(window, wsIndex);
             this._connectWindowSignals(window);
             this.emit('window-added', window, wsIndex);
+
+            // When window stops floating
+            this.emit('window-unfloating', window, wsIndex);
         } else {
-            // Check if window is actually tiled
+            // Window is tiled — float it
             const leaf = this._tree.findLeaf(window, this._tree.getRoot(wsIndex));
             if (!leaf || leaf.ratio === 0) return;
 
@@ -98,10 +116,9 @@ export class WindowTracker extends EventEmitter {
             this._tree.collapseNode(window, wsIndex);
             this._disconnectWindowSignals(window);
             this.emit('window-removed', window, wsIndex);
+            this.emit('window-floating', window, wsIndex);
 
             this._resizeToFloat(window, wsIndex);
-
-            // Watch for window close while floating
             this._watchFloatingWindow(window, wsIndex);
         }
     }
@@ -118,12 +135,38 @@ export class WindowTracker extends EventEmitter {
     }
 
     _watchFloatingWindow(window, wsIndex) {
-        const id = window.connect('unmanaged', () => {
-            window.disconnect(id);
+        const signals = [];
+
+        signals.push(window.connect('unmanaged', () => {
+            const sigs = this._floatingSignals?.get(window);
+            if (sigs) {
+                sigs.forEach(id => window.disconnect(id));
+                this._floatingSignals.delete(window);
+            }
             this._floatingWindows.delete(window);
-            this._tree.removeWindow(window, vsIndex);
+            this._tree.removeWindow(window, wsIndex);
             this.emit('window-removed', window, wsIndex);
-        });
+        }));
+
+        signals.push(window.connect('notify::maximized-horizontally', () => {
+            const maximized = window.get_maximized();
+            if (maximized === 3) {
+                this.emit('window-float-maximized', window);
+            } else if (maximized === 0) {
+                this.emit('window-float-restored', window);
+            }
+        }));
+
+        signals.push(window.connect('notify::minimized', () => {
+            if (window.minimized) {
+                this.emit('window-float-maximized', window); 
+            } else {
+                this.emit('window-float-restored', window); 
+            }
+        }));
+
+        this._floatingSignals = this._floatingSignals ?? new Map();
+        this._floatingSignals.set(window, signals);
     }
 
     _addToTiling(window) {
