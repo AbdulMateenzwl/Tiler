@@ -368,14 +368,41 @@ export class TileManager {
     _onFocusChanged() {
         const focused = global.display.focus_window;
         if (!focused) return;
-        console.log(`[Tiler] focus changed to: "${focused.get_title()}" maximized=${focused.get_maximized()}`);
 
         const wsIndex = focused.get_workspace().index();
         const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
-        console.log(`[Tiler] tiled windows: ${tiledWindows.map(w => w.get_title())}`);
-
         if (!tiledWindows.some(w => w === focused)) return;
+
         this._raiseTiledWindows(wsIndex);
+
+        // Snap focused window back to its tiled position after any self-resize
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const innerRect = {
+            x: workArea.x + 8, y: workArea.y + 8,
+            width: workArea.width - 16, height: workArea.height - 16,
+        };
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const target = layout.find(l => l.window === focused);
+        if (!target) return;
+
+        // Watch for self-resize after focus, snap back once
+        const id = focused.connect('size-changed', () => {
+            focused.disconnect(id);
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                const frame = focused.get_frame_rect();
+                if (frame.width !== target.width || frame.height !== target.height) {
+                    focused.move_resize_frame(false, target.x, target.y, target.width, target.height);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+
+        // Disconnect after 500ms if no resize happened
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            try { focused.disconnect(id); } catch { }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _applyLayout(wsIndex) {
