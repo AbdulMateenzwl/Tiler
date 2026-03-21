@@ -4,6 +4,11 @@ import GLib from 'gi://GLib';
 import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
 import { ContainerTree } from './containerTree.js';
 
+
+const FLOAT_WIDTH = 800;
+const FLOAT_HEIGHT = 600;
+
+
 export class WindowTracker extends EventEmitter {
     constructor() {
         super();
@@ -14,6 +19,7 @@ export class WindowTracker extends EventEmitter {
         this._windowSignals = new Map();
         this._displaySignals = [];
         this._recentlyUnmaximized = new Set();
+        this._floatingWindows = new Set();
     }
 
     enable() {
@@ -23,9 +29,11 @@ export class WindowTracker extends EventEmitter {
             })
         );
 
-        global.display.list_all_windows().forEach(window => {
-            if (this._shouldTrack(window))
-                this._addToTiling(window);
+        const existing = global.display.list_all_windows().filter(w => this._shouldTrack(w));
+        console.log(`[Tiler] enable: found ${existing.length} existing windows`);
+        existing.forEach(window => {
+            console.log(`[Tiler] enable: adding "${window.get_title()}"`);
+            this._addToTiling(window);
         });
     }
 
@@ -45,6 +53,7 @@ export class WindowTracker extends EventEmitter {
         this._maximizedWindows.clear();
         this._minimizedWindows.clear();
         this._recentlyUnmaximized.clear();
+        this._floatingWindows.clear();
     }
 
     getWindowsForWorkspace(wsIndex) {
@@ -69,6 +78,52 @@ export class WindowTracker extends EventEmitter {
         if (window.minimized) return false;
         if (window.get_maximized() !== 0) return false;
         return true;
+    }
+
+    toggleFloat(window) {
+        const wsIndex = window.get_workspace().index();
+
+        if (this._floatingWindows.has(window)) {
+            // Restore to tiling
+            this._floatingWindows.delete(window);
+            this._tree.restoreNode(window, wsIndex);
+            this._connectWindowSignals(window);
+            this.emit('window-added', window, wsIndex);
+        } else {
+            // Check if window is actually tiled
+            const leaf = this._tree.findLeaf(window, this._tree.getRoot(wsIndex));
+            if (!leaf || leaf.ratio === 0) return;
+
+            this._floatingWindows.add(window);
+            this._tree.collapseNode(window, wsIndex);
+            this._disconnectWindowSignals(window);
+            this.emit('window-removed', window, wsIndex);
+
+            this._resizeToFloat(window, wsIndex);
+
+            // Watch for window close while floating
+            this._watchFloatingWindow(window, wsIndex);
+        }
+    }
+
+    _resizeToFloat(window, wsIndex) {
+        const workspace = global.workspace_manager.get_workspace_by_index(wsIndex);
+        const monitor = global.display.get_primary_monitor();
+        const workArea = workspace.get_work_area_for_monitor(monitor);
+
+        const x = workArea.x + Math.floor((workArea.width - FLOAT_WIDTH) / 2);
+        const y = workArea.y + Math.floor((workArea.height - FLOAT_HEIGHT) / 2);
+
+        window.move_resize_frame(false, x, y, FLOAT_WIDTH, FLOAT_HEIGHT);
+    }
+
+    _watchFloatingWindow(window, wsIndex) {
+        const id = window.connect('unmanaged', () => {
+            window.disconnect(id);
+            this._floatingWindows.delete(window);
+            this._tree.removeWindow(window, vsIndex);
+            this.emit('window-removed', window, wsIndex);
+        });
     }
 
     _addToTiling(window) {
@@ -135,32 +190,35 @@ export class WindowTracker extends EventEmitter {
         }));
 
         signals.push(window.connect('notify::maximized-horizontally', () => {
-            const isMaximized = window.get_maximized() !== 0;
+            const maximized = window.get_maximized();
             const wsIndex = window.get_workspace().index();
 
-            if (isMaximized) {
-                this._maximizedWindows.add(window);
+            console.log(`[Tiler] maximized-horizontally: "${window.get_title()}" get_maximized()=${window.get_maximized()} isMaximized=${maximized} ws=${wsIndex}`);
 
-                // Collapse node — keeps leaf but zeroes ratio
+            const isFullyMaximized = maximized === 3;
+            const isPartiallyMaximized = maximized === 1 || maximized === 2;
+
+            if (isFullyMaximized) {
+                this._maximizedWindows.add(window);
                 this._tree.collapseNode(window, wsIndex);
                 this.emit('window-removed', window, wsIndex);
                 this.emit('window-maximized', window, wsIndex);
-            } else {
-                if (this._maximizedWindows.has(window)) {
-                    this._maximizedWindows.delete(window);
-
-                    // Restore node — restores ratio and renormalizes
-                    this._tree.restoreNode(window, wsIndex);
-
-                    this._recentlyUnmaximized.add(window);
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
-                        this._recentlyUnmaximized.delete(window);
-                        return GLib.SOURCE_REMOVE;
-                    });
-
-                    this.emit('window-added', window, wsIndex);
-                    this.emit('window-unmaximized', window, wsIndex);
-                }
+            } else if (isPartiallyMaximized) {
+                // GNOME half-tiling (Super+Arrow) — ignore completely
+                // Don't touch the tiling layer
+                // TODO: if we want to support this, we'll need to track it separately from full maximize and restore to the correct state on unmaximize
+                return;
+            } else if (maximized === 0 && this._maximizedWindows.has(window)) {
+                // Only restore if we actually tracked this as maximized
+                this._maximizedWindows.delete(window);
+                this._tree.restoreNode(window, wsIndex);
+                this._recentlyUnmaximized.add(window);
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                    this._recentlyUnmaximized.delete(window);
+                    return GLib.SOURCE_REMOVE;
+                });
+                this.emit('window-added', window, wsIndex);
+                this.emit('window-unmaximized', window, wsIndex);
             }
         }));
 
@@ -238,5 +296,9 @@ export class WindowTracker extends EventEmitter {
             }
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    addWindowToTiling(window) {
+        this._addToTiling(window);
     }
 }

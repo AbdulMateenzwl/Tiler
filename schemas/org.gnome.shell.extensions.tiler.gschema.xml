@@ -13,5 +13,9 @@
             <default>['&lt;Super&gt;&lt;Shift&gt;v']</default>
             <summary>Split next window vertically</summary>
         </key>
+        <key name="toggle-float" type="as">
+            <default>['&lt;Super&gt;f']</default>
+            <summary>Toggle window floating</summary>
+        </key>
     </schema>
 </schemalist>

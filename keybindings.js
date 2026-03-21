@@ -17,7 +17,7 @@ export class Keybindings {
             Shell.ActionMode.NORMAL,
             () => {
                 const wsIndex = global.workspace_manager.get_active_workspace_index();
-                this._tileManager._applyLayout(wsIndex);
+                this._retileAll(wsIndex);
             }
         );
 
@@ -44,11 +44,56 @@ export class Keybindings {
                 console.log(`[Tiler] pending split: vertical`);
             }
         );
+
+        Main.wm.addKeybinding(
+            'toggle-float',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => {
+                const focused = global.display.focus_window;
+                if (!focused) return;
+                this._tracker.toggleFloat(focused);
+            }
+        );
+    }
+
+    _retileAll(wsIndex) {
+        const display = global.display;
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const allTrackedWindows = this._getAllTreeWindows(root);
+
+        console.log(`[Tiler] retileAll: tracked=${allTrackedWindows.length}`);
+
+        display.list_all_windows().forEach(window => {
+            if (window.get_workspace()?.index() !== wsIndex) return;
+            if (window.get_window_type() !== 0) return;
+            if (window.get_maximized() !== 0) return;
+            if (window.minimized) return;
+            if (window.is_skip_taskbar()) return;
+            if (allTrackedWindows.some(w => w === window)) return;
+
+            console.log(`[Tiler] retile: adding untracked "${window.get_title()}"`);
+            this._tracker.addWindowToTiling(window);
+        });
+
+        this._tileManager._applyLayout(wsIndex);
+    }
+
+    _getAllTreeWindows(node) {
+        if (!node) return [];
+        if (node.type === 'leaf') return [node.window];
+        const results = [];
+        for (const child of node.children) {
+            results.push(...this._getAllTreeWindows(child));
+        }
+        return results;
     }
 
     disable() {
         Main.wm.removeKeybinding('retile-windows');
         Main.wm.removeKeybinding('split-horizontal');
         Main.wm.removeKeybinding('split-vertical');
+        Main.wm.removeKeybinding('toggle-float');
     }
 }

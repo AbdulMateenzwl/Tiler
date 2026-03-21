@@ -80,6 +80,14 @@ export class TileManager {
                 }
             })
         );
+
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            const wsCount = global.workspace_manager.get_n_workspaces();
+            for (let i = 0; i < wsCount; i++) {
+                this._applyLayout(i);
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     disable() {

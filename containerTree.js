@@ -225,6 +225,9 @@ export class ContainerTree {
         console.log(`[Tiler] collapseNode: "${window.get_title()}" leaf found=${!!leaf} ratio=${leaf?.ratio}`);
         if (!leaf) return;
 
+        // Already collapsed — don't overwrite savedRatio
+        if (leaf.ratio === 0) return;
+
         const parent = this.findParent(leaf.id, root) ?? root;
 
         // Save ALL siblings ratios before collapsing
@@ -253,7 +256,9 @@ export class ContainerTree {
 
         const allZero = parent.children.every(c => c.ratio === 0);
         if (allZero) {
-            parent.savedRatio = parent.ratio;
+            if (parent.ratio > 0) {
+                parent.savedRatio = parent.ratio;
+            }
             parent.ratio = 0;
             this._propagateCollapseUp(parent.id, root);
         }
