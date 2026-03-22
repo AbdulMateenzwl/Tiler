@@ -20,6 +20,7 @@ export class WindowTracker extends EventEmitter {
         this._displaySignals = [];
         this._recentlyUnmaximized = new Set();
         this._floatingWindows = new Set();
+        this._floatingSignals = new Map();
     }
 
     enable() {
@@ -60,6 +61,13 @@ export class WindowTracker extends EventEmitter {
                 signals.forEach(id => window.disconnect(id));
             }
             this._floatingSignals.clear();
+        }
+
+        if (this._unmaximizeStore) {
+            for (const [window, id] of this._unmaximizeStore) {
+                try { window.disconnect(id); } catch { }
+            }
+            this._unmaximizeStore.clear();
         }
     }
 
@@ -125,7 +133,7 @@ export class WindowTracker extends EventEmitter {
 
     _resizeToFloat(window, wsIndex) {
         const workspace = global.workspace_manager.get_workspace_by_index(wsIndex);
-        const monitor = global.display.get_primary_monitor();
+        const monitor = window.get_monitor();
         const workArea = workspace.get_work_area_for_monitor(monitor);
 
         const x = workArea.x + Math.floor((workArea.width - FLOAT_WIDTH) / 2);
@@ -146,6 +154,12 @@ export class WindowTracker extends EventEmitter {
             this._floatingWindows.delete(window);
             this._tree.removeWindow(window, wsIndex);
             this.emit('window-removed', window, wsIndex);
+
+            const unMaxId = this._unmaximizeStore?.get(window);
+            if (unMaxId) {
+                try { window.disconnect(unMaxId); } catch { }
+                this._unmaximizeStore.delete(window);
+            }
         }));
 
         signals.push(window.connect('notify::maximized-horizontally', () => {
@@ -165,7 +179,6 @@ export class WindowTracker extends EventEmitter {
             }
         }));
 
-        this._floatingSignals = this._floatingSignals ?? new Map();
         this._floatingSignals.set(window, signals);
     }
 
@@ -182,6 +195,12 @@ export class WindowTracker extends EventEmitter {
     }
 
     _connectWindowSignals(window) {
+
+        // Always disconnect first to prevent stale or duplicate signals
+        if (this._windowSignals.has(window)) {
+            this._disconnectWindowSignals(window);
+        }
+
         if (this._windowSignals.has(window)) return;
 
         let savedWsIndex = window.get_workspace().index();
@@ -327,10 +346,13 @@ export class WindowTracker extends EventEmitter {
         const id = window.connect('notify::maximized-horizontally', () => {
             if (window.get_maximized() === 0) {
                 window.disconnect(id);
+                this._unmaximizeStore.delete(window);
                 if (this._shouldTrack(window))
                     this._addToTiling(window);
             }
         });
+        this._unmaximizeStore = this._unmaximizeStore ?? new Map();
+        this._unmaximizeStore.set(window, id);
     }
 
     _onWindowCreated(window) {
@@ -348,6 +370,7 @@ export class WindowTracker extends EventEmitter {
     }
 
     addWindowToTiling(window) {
+        if (this._floatingWindows.has(window)) return;
         this._addToTiling(window);
     }
 }

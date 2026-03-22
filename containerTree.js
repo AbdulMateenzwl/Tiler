@@ -454,4 +454,55 @@ export class ContainerTree {
         }
 
     }
+
+    findWindowInDirection(window, direction, layout) {
+        const current = layout.find(l => l.window === window);
+        if (!current) return null;
+
+        let best = null;
+        let bestScore = Infinity;
+
+        for (const entry of layout) {
+            if (entry.window === window) continue;
+
+            let isCorrectDirection = false;
+            let primaryDist = 0;
+            let overlap = 0;
+
+            switch (direction) {
+                case 'left':
+                    isCorrectDirection = entry.x + entry.width <= current.x + 1;
+                    primaryDist = current.x - (entry.x + entry.width);
+                    overlap = Math.max(0, Math.min(current.y + current.height, entry.y + entry.height) - Math.max(current.y, entry.y));
+                    break;
+                case 'right':
+                    isCorrectDirection = entry.x >= current.x + current.width - 1;
+                    primaryDist = entry.x - (current.x + current.width);
+                    overlap = Math.max(0, Math.min(current.y + current.height, entry.y + entry.height) - Math.max(current.y, entry.y));
+                    break;
+                case 'up':
+                    isCorrectDirection = entry.y + entry.height <= current.y + 1;
+                    primaryDist = current.y - (entry.y + entry.height);
+                    overlap = Math.max(0, Math.min(current.x + current.width, entry.x + entry.width) - Math.max(current.x, entry.x));
+                    break;
+                case 'down':
+                    isCorrectDirection = entry.y >= current.y + current.height - 1;
+                    primaryDist = entry.y - (current.y + current.height);
+                    overlap = Math.max(0, Math.min(current.x + current.width, entry.x + entry.width) - Math.max(current.x, entry.x));
+                    break;
+            }
+
+            if (!isCorrectDirection || overlap === 0) continue;
+
+            const score = primaryDist * 1000 - overlap;
+            if (score < bestScore) {
+                bestScore = score;
+                best = entry.window;
+            }
+        }
+
+        return best;
+    }
+
+
 }

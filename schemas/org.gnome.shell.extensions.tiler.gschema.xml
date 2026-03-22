@@ -25,5 +25,21 @@
             <default>['&lt;Super&gt;&lt;Shift&gt;x']</default>
             <summary>Set drag mode to insert</summary>
         </key>
+        <key name="focus-left" type="as">
+            <default>['&lt;Super&gt;h']</default>
+            <summary>Focus window to the left</summary>
+        </key>
+        <key name="focus-right" type="as">
+            <default>['&lt;Super&gt;l']</default>
+            <summary>Focus window to the right</summary>
+        </key>
+        <key name="focus-up" type="as">
+            <default>['&lt;Super&gt;k']</default>
+            <summary>Focus window above</summary>
+        </key>
+        <key name="focus-down" type="as">
+            <default>['&lt;Super&gt;j']</default>
+            <summary>Focus window below</summary>
+        </key>
     </schema>
 </schemalist>

@@ -2,6 +2,8 @@ import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+import { LayoutEngine } from './layoutEngine.js';
+
 export class Keybindings {
     constructor(tileManager, tracker, settings) {
         this._tileManager = tileManager;
@@ -76,6 +78,37 @@ export class Keybindings {
                 this._tileManager.setDragMode('insert');
             }
         );
+
+        const directions = ['left', 'right', 'up', 'down'];
+        const keys = ['focus-left', 'focus-right', 'focus-up', 'focus-down'];
+
+        directions.forEach((direction, i) => {
+            Main.wm.addKeybinding(
+                keys[i],
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL,
+                () => {
+                    const focused = global.display.focus_window;
+                    if (!focused) return;
+
+                    const wsIndex = global.workspace_manager.get_active_workspace_index();
+                    const root = this._tracker.getRootForWorkspace(wsIndex);
+                    const workArea = global.workspace_manager
+                        .get_workspace_by_index(wsIndex)
+                        .get_work_area_for_monitor(global.display.get_primary_monitor());
+
+                    const innerRect = {
+                        x: workArea.x + 8, y: workArea.y + 8,
+                        width: workArea.width - 16, height: workArea.height - 16,
+                    };
+
+                    const layout = LayoutEngine.calculate(root, innerRect, 8);
+                    const target = this._tracker._tree.findWindowInDirection(focused, direction, layout);
+                    if (target) target.focus(global.get_current_time());
+                }
+            );
+        });
     }
 
     _retileAll(wsIndex) {
@@ -117,5 +150,9 @@ export class Keybindings {
         Main.wm.removeKeybinding('toggle-float');
         Main.wm.removeKeybinding('drag-mode-swap');
         Main.wm.removeKeybinding('drag-mode-insert');
+
+        ['focus-left', 'focus-right', 'focus-up', 'focus-down'].forEach(key => {
+            Main.wm.removeKeybinding(key);
+        });
     }
 }
