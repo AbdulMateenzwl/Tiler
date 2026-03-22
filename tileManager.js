@@ -20,6 +20,8 @@ export class TileManager {
         this._isResizing = false;
         this._lastTempRatios = null;
 
+        this._applyingLayout = false;
+
         this._tracker.connect('window-added', (_, window, wsIndex) => {
             this._scheduleLayout(wsIndex);
         });
@@ -356,7 +358,7 @@ export class TileManager {
             this._layoutTimers.delete(wsIndex);
         }
 
-        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => {
+        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
             this._layoutTimers.delete(wsIndex);
             this._applyLayout(wsIndex);
             return GLib.SOURCE_REMOVE;
@@ -375,21 +377,25 @@ export class TileManager {
 
         this._raiseTiledWindows(wsIndex);
 
-        // Snap focused window back to its tiled position after any self-resize
-        const root = this._tracker.getRootForWorkspace(wsIndex);
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
-        };
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
-        const target = layout.find(l => l.window === focused);
-        if (!target) return;
-
-        // Watch for self-resize after focus, snap back once
         const id = focused.connect('size-changed', () => {
             focused.disconnect(id);
+
+            // Don't snap if we are the ones moving the window
+            if (this._applyingLayout) return;
+
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                if (this._applyingLayout) return GLib.SOURCE_REMOVE;
+
+                const root = this._tracker.getRootForWorkspace(wsIndex);
+                const workArea = LayoutEngine.getWorkArea(wsIndex);
+                const innerRect = {
+                    x: workArea.x + 8, y: workArea.y + 8,
+                    width: workArea.width - 16, height: workArea.height - 16,
+                };
+                const layout = LayoutEngine.calculate(root, innerRect, 8);
+                const target = layout.find(l => l.window === focused);
+                if (!target) return GLib.SOURCE_REMOVE;
+
                 const frame = focused.get_frame_rect();
                 if (frame.width !== target.width || frame.height !== target.height) {
                     focused.move_resize_frame(false, target.x, target.y, target.width, target.height);
@@ -398,7 +404,6 @@ export class TileManager {
             });
         });
 
-        // Disconnect after 500ms if no resize happened
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
             try { focused.disconnect(id); } catch { }
             return GLib.SOURCE_REMOVE;
@@ -406,22 +411,25 @@ export class TileManager {
     }
 
     _applyLayout(wsIndex) {
+        this._applyingLayout = true;
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
-
-        // Add outer gap
         const innerRect = {
             x: workArea.x + 8,
             y: workArea.y + 8,
             width: workArea.width - 16,
             height: workArea.height - 16,
         };
-
         const layout = LayoutEngine.calculate(root, innerRect, 8);
-
         layout.forEach(({ window, x, y, width, height }) => {
             if (this._grabActive && window === global.display.focus_window) return;
             this._moveWindow(window, x, y, width, height);
+        });
+
+        // Clear flag after Mutter processes the moves
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            this._applyingLayout = false;
+            return GLib.SOURCE_REMOVE;
         });
     }
 
@@ -439,9 +447,16 @@ export class TileManager {
 
     _moveWindow(window, x, y, width, height) {
         const actor = window.get_compositor_private();
-        if (!actor) return;
-
+        if (!actor) {
+            console.log(`[Tiler] _moveWindow: no actor for "${window.get_title()}"`);
+            return;
+        }
+        if (this._grabActive && window === global.display.focus_window) {
+            console.log(`[Tiler] _moveWindow: skipping "${window.get_title()}" — grab active`);
+            return;
+        }
         const frame = window.get_frame_rect();
+        console.log(`[Tiler] _moveWindow: "${window.get_title()}" to ${x},${y} ${width}x${height} frame=${frame.x},${frame.y} ${frame.width}x${frame.height}`);
         if (frame.width === 0 || frame.height === 0) {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
                 window.move_resize_frame(false, x, y, width, height);

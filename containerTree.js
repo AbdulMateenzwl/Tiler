@@ -99,24 +99,29 @@ export class ContainerTree {
         const hasPendingSplit = this._pendingSplitDirection.has(wsIndex);
 
         if (!hasPendingSplit) {
-            // Default — add as sibling in focused window's parent container
             const focusedLeaf = focusedWindow ? this.findLeaf(focusedWindow, root) : null;
             const parent = focusedLeaf
                 ? (this.findParent(focusedLeaf.id, root) ?? root)
                 : root;
 
-            // Insert after focused leaf
             const insertIdx = focusedLeaf
                 ? parent.children.indexOf(focusedLeaf) + 1
                 : parent.children.length;
 
+            if (focusedLeaf) {
+                // Take half of focused window's ratio
+                const half = focusedLeaf.ratio / 2;
+                focusedLeaf.ratio = half;
+                newLeaf.ratio = half;
+            } else {
+                // No focused window — distribute equally among all visible
+                const visible = parent.children.filter(c => c.ratio > 0);
+                const equal = 1 / (visible.length + 1);
+                visible.forEach(c => c.ratio = equal);
+                newLeaf.ratio = equal;
+            }
+
             parent.children.splice(insertIdx, 0, newLeaf);
-
-            // Redistribute equally among visible siblings
-            const visible = parent.children.filter(c => c.ratio > 0);
-            const equal = 1 / visible.length;
-            visible.forEach(c => c.ratio = equal);
-
         } else {
             // User set split direction — create nested container in focused window's slot
             const splitDirection = this.getPendingSplit(wsIndex);
@@ -125,26 +130,38 @@ export class ContainerTree {
             const focusedLeaf = focusedWindow ? this.findLeaf(focusedWindow, root) : null;
 
             if (!focusedLeaf) {
-                // No focused leaf — just append to root
-                root.children.push(newLeaf);
                 const visible = root.children.filter(c => c.ratio > 0);
-                const equal = 1 / visible.length;
-                visible.forEach(c => c.ratio = equal);
+                if (visible.length === 0) {
+                    newLeaf.ratio = 1;
+                } else {
+                    const lastVisible = visible[visible.length - 1];
+                    const half = lastVisible.ratio / 2;
+                    lastVisible.ratio = half;
+                    newLeaf.ratio = half;
+                }
+                root.children.push(newLeaf);
                 return;
             }
 
-            const parent = this.findParent(focusedLeaf.id, root);
-            if (!parent) return;
+            const parent = this.findParent(focusedLeaf.id, root) ?? root;
+            const insertIdx = parent.children.indexOf(focusedLeaf) + 1;
 
-            const idx = parent.children.indexOf(focusedLeaf);
+            if (parent.direction === splitDirection) {
+                // Parent already has the same direction — add as sibling after focused leaf
+                const visible = parent.children.filter(c => c.ratio > 0);
+                const equal = 1 / (visible.length + 1);
+                visible.forEach(c => c.ratio = equal);
+                newLeaf.ratio = equal;
+                parent.children.splice(insertIdx, 0, newLeaf);
+            } else {
+                // Different direction — create nested container in focused leaf's slot
+                const newContainer = this._makeContainer(splitDirection, [
+                    { ...focusedLeaf, ratio: 0.5, savedRatio: null },
+                    { ...newLeaf, ratio: 0.5 },
+                ], focusedLeaf.ratio);
 
-            // Replace focused leaf with a new container of the requested direction
-            const newContainer = this._makeContainer(splitDirection, [
-                { ...focusedLeaf, ratio: 0.5, savedRatio: null },
-                { ...newLeaf, ratio: 0.5 },
-            ], focusedLeaf.ratio);
-
-            parent.children[idx] = newContainer;
+                parent.children[parent.children.indexOf(focusedLeaf)] = newContainer;
+            }
         }
     }
 
@@ -157,16 +174,32 @@ export class ContainerTree {
 
     _removeLeaf(leaf, root) {
         const parent = this.findParent(leaf.id, root);
-
         if (!parent) {
             const idx = root.children.indexOf(leaf);
             if (idx === -1) return;
             root.children.splice(idx, 1);
             this._redistributeRatios(root);
+            console.log(`[Tree] after remove from root: ${JSON.stringify(root.children.map(c => ({ id: c.id, ratio: c.ratio })))}`);
             return;
         }
-
         const idx = parent.children.indexOf(leaf);
+        parent.children.splice(idx, 1);
+        console.log(`[Tree] after splice: ${JSON.stringify(parent.children.map(c => ({ id: c.id, ratio: c.ratio })))}`);
+        if (parent.children.length === 0) {
+            this._removeNode(parent, root);
+        } else if (parent.children.length === 1) {
+            this._collapseContainer(parent, root);
+        } else {
+            this._redistributeRatios(parent);
+            console.log(`[Tree] after redistribute: ${JSON.stringify(parent.children.map(c => ({ id: c.id, ratio: c.ratio })))}`);
+        }
+    }
+
+    _removeNode(node, root) {
+        const parent = this.findParent(node.id, root);
+        if (!parent) return;
+
+        const idx = parent.children.indexOf(node);
         parent.children.splice(idx, 1);
 
         if (parent.children.length === 0) {
@@ -178,26 +211,32 @@ export class ContainerTree {
         }
     }
 
-    _removeNode(node, root) {
-        const parent = this.findParent(node.id, root);
-        if (!parent) return;
-
-        const idx = parent.children.indexOf(node);
-        parent.children.splice(idx, 1);
-
-        if (parent.children.length === 1) {
-            this._collapseContainer(parent, root);
-        } else {
-            this._redistributeRatios(parent);
-        }
-    }
-
     _collapseContainer(container, root) {
         const onlyChild = container.children[0];
-        onlyChild.ratio = container.ratio;
+
+        if (onlyChild.type === 'container') {
+            // Container child — always safe to inherit ratio
+            onlyChild.ratio = container.ratio;
+            onlyChild.savedRatio = container.savedRatio;
+        } else {
+            // Leaf child — check if it's collapsed
+            if (onlyChild.ratio === 0) {
+                // Child is collapsed (maximized/minimized) — update savedRatio not ratio
+                // so when it restores it gets the correct space
+                onlyChild.savedRatio = container.ratio;
+            } else {
+                onlyChild.ratio = container.ratio;
+            }
+        }
 
         const parent = this.findParent(container.id, root);
-        if (!parent) return;
+        if (!parent) {
+            if (onlyChild.type === 'container') {
+                root.direction = onlyChild.direction;
+                root.children = onlyChild.children;
+            }
+            return;
+        }
 
         const idx = parent.children.indexOf(container);
         parent.children[idx] = onlyChild;
@@ -222,31 +261,25 @@ export class ContainerTree {
     collapseNode(window, wsIndex) {
         const root = this.getRoot(wsIndex);
         const leaf = this.findLeaf(window, root);
-        console.log(`[Tiler] collapseNode: "${window.get_title()}" leaf found=${!!leaf} ratio=${leaf?.ratio}`);
         if (!leaf) return;
-
-        // Already collapsed — don't overwrite savedRatio
         if (leaf.ratio === 0) return;
 
-        const parent = this.findParent(leaf.id, root) ?? root;
-
-        // Save ALL siblings ratios before collapsing
+        // Save only own ratio
         leaf.savedRatio = leaf.ratio;
-        leaf._siblingRatiosSnapshot = parent.children.map(c => ({
-            id: c.id,
-            ratio: c.ratio
-        }));
-
         leaf.ratio = 0;
 
-        // Redistribute visible siblings proportionally
+        // Redistribute freed space proportionally among visible siblings
+        const parent = this.findParent(leaf.id, root) ?? root;
         const visible = parent.children.filter(c => c.ratio > 0);
-        const totalVisible = visible.reduce((sum, c) => sum + c.ratio, 0);
-        if (totalVisible > 0) {
-            visible.forEach(c => c.ratio = c.ratio / totalVisible);
+        const total = visible.reduce((sum, c) => sum + c.ratio, 0);
+
+        if (total > 0) {
+            visible.forEach(c => c.ratio = c.ratio / total);
+        } else {
+            const equal = 1 / visible.length;
+            visible.forEach(c => c.ratio = equal);
         }
 
-        // Propagate up if needed
         this._propagateCollapseUp(leaf.id, root);
     }
 
@@ -291,40 +324,34 @@ export class ContainerTree {
         const root = this.getRoot(wsIndex);
         const leaf = this.findLeaf(window, root);
         if (!leaf) return;
+        if (leaf.savedRatio === null || leaf.savedRatio === undefined) return;
 
         this._restoreAncestors(leaf.id, root);
 
         const parent = this.findParent(leaf.id, root) ?? root;
+        const savedRatio = leaf.savedRatio;
 
-        console.log(`[Tiler] restoreNode: "${window.get_title()}" savedRatio=${leaf.savedRatio} snapshotLength=${leaf._siblingRatiosSnapshot?.length}`);
-        console.log(`[Tiler] parent children before restore:`, JSON.stringify(parent.children.map(c => ({ id: c.id, ratio: c.ratio, savedRatio: c.savedRatio }))));
+        // Restore leaf's own ratio
+        leaf.ratio = savedRatio;
+        leaf.savedRatio = null;
 
-        if (leaf._siblingRatiosSnapshot) {
-            leaf._siblingRatiosSnapshot.forEach(saved => {
-                const sibling = parent.children.find(c => c.id === saved.id);
-                if (!sibling) return;
-                if (sibling !== leaf && sibling.savedRatio !== null) return;
-                sibling.ratio = saved.ratio;
-            });
-            leaf._siblingRatiosSnapshot = null;
-            leaf.savedRatio = null; // ← clear this too
-        } else if (leaf.savedRatio !== null) {
-            leaf.ratio = leaf.savedRatio;
-            leaf.savedRatio = null; // ← already here but make sure it's present
-        }
+        // Scale down visible siblings proportionally to make room
+        const visible = parent.children.filter(c => c.ratio > 0 && c !== leaf);
 
-        const visibleSiblings = parent.children.filter(c => c.ratio > 0);
-        if (visibleSiblings.length === 0) {
+        if (visible.length === 0) {
             leaf.ratio = 1;
             return;
         }
 
-        if (visibleSiblings.length === 1 && visibleSiblings[0] === leaf) {
-            leaf.ratio = 1;
-            return;
-        }
+        const remainingSpace = 1 - savedRatio;
+        const total = visible.reduce((sum, c) => sum + c.ratio, 0);
 
-        this._renormalizeContainer(parent);
+        if (total > 0) {
+            visible.forEach(c => c.ratio = remainingSpace * (c.ratio / total));
+        } else {
+            const equal = remainingSpace / visible.length;
+            visible.forEach(c => c.ratio = equal);
+        }
     }
 
     _restoreAncestors(nodeId, root) {

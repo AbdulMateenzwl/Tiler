@@ -159,9 +159,9 @@ export class WindowTracker extends EventEmitter {
 
         signals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
-                this.emit('window-float-maximized', window); 
+                this.emit('window-float-maximized', window);
             } else {
-                this.emit('window-float-restored', window); 
+                this.emit('window-float-restored', window);
             }
         }));
 
@@ -226,7 +226,9 @@ export class WindowTracker extends EventEmitter {
         }));
 
         signals.push(window.connect('workspace-changed', () => {
-            const newWsIndex = window.get_workspace().index();
+            const ws = window.get_workspace();
+            if (!ws) return;
+            const newWsIndex = ws.index();
             this._tree.moveToWorkspace(window, savedWsIndex, newWsIndex);
             this.emit('window-workspace-changed', window, newWsIndex);
             savedWsIndex = newWsIndex;
@@ -271,7 +273,11 @@ export class WindowTracker extends EventEmitter {
     _disconnectWindowSignals(window) {
         const signals = this._windowSignals.get(window);
         if (!signals) return;
-        signals.forEach(id => window.disconnect(id));
+        signals.forEach(id => {
+            try {
+                window.disconnect(id);
+            } catch { }
+        });
         this._windowSignals.delete(window);
     }
 
