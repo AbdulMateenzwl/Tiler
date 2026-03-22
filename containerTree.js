@@ -154,13 +154,19 @@ export class ContainerTree {
                 newLeaf.ratio = equal;
                 parent.children.splice(insertIdx, 0, newLeaf);
             } else {
-                // Different direction — create nested container in focused leaf's slot
-                const newContainer = this._makeContainer(splitDirection, [
-                    { ...focusedLeaf, ratio: 0.5, savedRatio: null },
-                    { ...newLeaf, ratio: 0.5 },
-                ], focusedLeaf.ratio);
+                const containerRatio = focusedLeaf.ratio;
+                const focusedIdx = parent.children.indexOf(focusedLeaf);
 
-                parent.children[parent.children.indexOf(focusedLeaf)] = newContainer;
+                focusedLeaf.ratio = 0.5;
+                focusedLeaf.savedRatio = null;
+                newLeaf.ratio = 0.5;
+
+                const newContainer = this._makeContainer(splitDirection, [
+                    focusedLeaf,
+                    newLeaf,
+                ], containerRatio);
+
+                parent.children[focusedIdx] = newContainer;
             }
         }
     }
@@ -297,25 +303,6 @@ export class ContainerTree {
         }
     }
 
-    _redistributeAfterCollapse(nodeId, root) {
-        const parent = this.findParent(nodeId, root);
-        if (!parent) return;
-
-        const visible = parent.children.filter(c => c.ratio > 0);
-        if (visible.length === 0) {
-            // All siblings are zero — parent handled by propagate
-            this._redistributeAfterCollapse(parent.id, root);
-            return;
-        }
-
-        // Redistribute total ratio of parent proportionally among visible children
-        const totalVisible = visible.reduce((sum, c) => sum + c.ratio, 0);
-        const targetTotal = parent.ratio > 0 ? 1 : 0;
-        if (totalVisible > 0) {
-            visible.forEach(c => c.ratio = (c.ratio / totalVisible) * targetTotal);
-        }
-    }
-
     /**
      * Restore a node (window returning from minimized/maximized).
      * Walks up restoring savedRatios, renormalizes at each level.
@@ -331,11 +318,9 @@ export class ContainerTree {
         const parent = this.findParent(leaf.id, root) ?? root;
         const savedRatio = leaf.savedRatio;
 
-        // Restore leaf's own ratio
         leaf.ratio = savedRatio;
         leaf.savedRatio = null;
 
-        // Scale down visible siblings proportionally to make room
         const visible = parent.children.filter(c => c.ratio > 0 && c !== leaf);
 
         if (visible.length === 0) {
@@ -343,15 +328,25 @@ export class ContainerTree {
             return;
         }
 
+        // Check if ratios would go negative after restore
+        const visibleTotal = visible.reduce((sum, c) => sum + c.ratio, 0);
         const remainingSpace = 1 - savedRatio;
-        const total = visible.reduce((sum, c) => sum + c.ratio, 0);
 
-        if (total > 0) {
-            visible.forEach(c => c.ratio = remainingSpace * (c.ratio / total));
-        } else {
+        if (remainingSpace <= 0) {
+            // savedRatio is too large — clamp to equal share
+            const equal = 1 / (visible.length + 1);
+            leaf.ratio = equal;
+            visible.forEach(c => c.ratio = equal);
+            return;
+        }
+
+        if (visibleTotal <= 0) {
             const equal = remainingSpace / visible.length;
             visible.forEach(c => c.ratio = equal);
+            return;
         }
+
+        visible.forEach(c => c.ratio = remainingSpace * (c.ratio / visibleTotal));
     }
 
     _restoreAncestors(nodeId, root) {
@@ -388,5 +383,75 @@ export class ContainerTree {
     clearWorkspace(wsIndex) {
         this._roots.delete(wsIndex);
         this._pendingSplitDirection.delete(wsIndex);
+    }
+
+    swapWindows(windowA, windowB, wsIndex) {
+        const root = this.getRoot(wsIndex);
+        const leafA = this.findLeaf(windowA, root);
+        const leafB = this.findLeaf(windowB, root);
+        console.log(`[Tiler] swapWindows: leafA=${!!leafA} leafB=${!!leafB}`);
+        if (!leafA || !leafB) return;
+        leafA.window = windowB;
+        leafB.window = windowA;
+        console.log(`[Tiler] swapWindows: done`);
+    }
+
+    insertWindowRelativeTo(windowToMove, targetWindow, position, wsIndex) {
+        // position: 'before' | 'after' | 'above' | 'below'
+        const root = this.getRoot(wsIndex);
+
+        // Remove window from its current position
+        const movingLeaf = this.findLeaf(windowToMove, root);
+        if (!movingLeaf) return;
+
+        // Save ratio before removal
+        const savedRatio = movingLeaf.ratio;
+        this.removeWindow(windowToMove, wsIndex);
+
+        // Find target after removal (tree may have changed)
+        const targetLeaf = this.findLeaf(targetWindow, root);
+        if (!targetLeaf) return;
+
+        const targetParent = this.findParent(targetLeaf.id, root) ?? root;
+        const targetIdx = targetParent.children.indexOf(targetLeaf);
+
+        const isHorizontal = position === 'before' || position === 'after';
+        const requiredDirection = isHorizontal ? 'horizontal' : 'vertical';
+
+        const newLeaf = this._makeLeaf(windowToMove, 0);
+        newLeaf.ratio = savedRatio;
+
+        if (targetParent.direction === requiredDirection) {
+            // Insert into same container
+            const insertIdx = position === 'after' || position === 'below'
+                ? targetIdx + 1
+                : targetIdx;
+
+            // Give new leaf half of target's ratio
+            const half = targetLeaf.ratio / 2;
+            targetLeaf.ratio = half;
+            newLeaf.ratio = half;
+
+            targetParent.children.splice(insertIdx, 0, newLeaf);
+        } else {
+            // Create container with correct ratio
+            const containerRatio = targetLeaf.ratio;
+            const newContainer = this._makeContainer(requiredDirection, [], containerRatio);
+
+            // Modify targetLeaf in place — preserves all external references
+            targetLeaf.ratio = 0.5;
+            targetLeaf.savedRatio = null;
+            newLeaf.ratio = 0.5;
+
+            if (position === 'after' || position === 'below') {
+                newContainer.children = [targetLeaf, newLeaf];
+            } else {
+                newContainer.children = [newLeaf, targetLeaf];
+            }
+
+            // Replace targetLeaf's slot in parent with newContainer
+            targetParent.children[targetIdx] = newContainer;
+        }
+
     }
 }

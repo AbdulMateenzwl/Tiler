@@ -3,6 +3,7 @@ import GLib from 'gi://GLib';
 import { LayoutEngine } from './layoutEngine.js';
 import Meta from 'gi://Meta';
 import Clutter from 'gi://Clutter';
+import St from 'gi://St';
 
 export class TileManager {
     constructor(tracker) {
@@ -22,36 +23,59 @@ export class TileManager {
 
         this._applyingLayout = false;
 
-        this._tracker.connect('window-added', (_, window, wsIndex) => {
-            this._scheduleLayout(wsIndex);
-        });
+        this._dragWindow = null;
+        this._dragTarget = null;
+        this._highlightWidget = null;
 
-        this._tracker.connect('window-removed', (_, window, wsIndex) => {
-            console.log(`[Tiler] window-removed wsIndex=${wsIndex}`);
-            this._scheduleLayout(wsIndex);
-        });
+        this._dragPosition = null;
 
-        this._tracker.connect('window-workspace-changed', (_, window, newWsIndex) => {
-            const wsCount = global.workspace_manager.get_n_workspaces();
-            for (let i = 0; i < wsCount; i++) {
-                this._scheduleLayout(i);
-            }
-        });
+        this._dragMode = 'insert';
+        this._dragPollId = null;
 
-        this._tracker.connect('window-unmaximized', (_, window, wsIndex) => {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-                this._raiseTiledWindows(wsIndex);
-                return GLib.SOURCE_REMOVE;
-            });
-        });
+        this._applyingLayoutTimer = null;
 
-        this._tracker.connect('window-maximized', (_, window, wsIndex) => {
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-                this._lowerTiledWindows(wsIndex);
-                window.raise();
-                return GLib.SOURCE_REMOVE;
-            });
-        });
+        this._focusSizeSignal = null;
+        this._focusCleanupTimer = null;
+
+        this._signals.push(
+            this._tracker.connect('window-added', (_, window, wsIndex) => {
+                this._scheduleLayout(wsIndex);
+            })
+        );
+
+        this._signals.push(
+            this._tracker.connect('window-removed', (_, window, wsIndex) => {
+                this._scheduleLayout(wsIndex);
+            })
+        );
+
+        this._signals.push(
+            this._tracker.connect('window-workspace-changed', (_, window, newWsIndex) => {
+                const wsCount = global.workspace_manager.get_n_workspaces();
+                for (let i = 0; i < wsCount; i++) {
+                    this._scheduleLayout(i);
+                }
+            })
+        );
+
+        this._signals.push(
+            this._tracker.connect('window-unmaximized', (_, window, wsIndex) => {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+                    this._raiseTiledWindows(wsIndex);
+                    return GLib.SOURCE_REMOVE;
+                });
+            })
+        );
+
+        this._signals.push(
+            this._tracker.connect('window-maximized', (_, window, wsIndex) => {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+                    this._lowerTiledWindows(wsIndex);
+                    window.raise();
+                    return GLib.SOURCE_REMOVE;
+                });
+            })
+        );
 
         this._displaySignals.push(
             global.display.connect('notify::focus-window', () => {
@@ -61,8 +85,22 @@ export class TileManager {
 
         this._displaySignals.push(
             global.display.connect('grab-op-begin', (display, window, grabOp) => {
-                if (this._isMovingGrab(grabOp))
+                if (this._isMovingGrab(grabOp)) {
                     this._grabActive = true;
+                    const wsIndex = window.get_workspace()?.index();
+                    if (wsIndex !== undefined) {
+                        const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
+                        if (tiledWindows.some(w => w === window) &&
+                            !this._tracker._floatingWindows.has(window)) {
+                            this._dragWindow = window;
+                            if (this._dragMode === 'swap') {
+                                this._startSwapDragTracking(window, wsIndex);
+                            } else {
+                                this._startInsertDragTracking(window, wsIndex);
+                            }
+                        }
+                    }
+                }
                 if (this._isResizingGrab(grabOp)) {
                     this._resizeGrabOp = grabOp;
                     this._startLiveResize(window, grabOp);
@@ -77,6 +115,18 @@ export class TileManager {
                     this._stopLiveResize();
                     this._onResizeEnd(window, grabOp);
                     this._resizeGrabOp = null;
+                } else if (this._isMovingGrab(grabOp)) {
+                    const dragWindow = this._dragWindow;
+                    const dragTarget = this._dragTarget;
+                    const dragPosition = this._dragPosition;
+                    if (this._dragMode === 'swap') {
+                        this._stopSwapDragTracking();
+                        this._onSwapDragEnd(window, dragWindow, dragTarget);
+                    } else {
+                        this._stopInsertDragTracking();
+                        this._onInsertDragEnd(window, dragWindow, dragTarget, dragPosition);
+                    }
+                    this._dragMode = 'insert';
                 } else {
                     this._onGrabOpEnd(window, grabOp);
                 }
@@ -105,6 +155,267 @@ export class TileManager {
         this._layoutTimers.clear();
 
         this._stopLiveResize();
+
+        this._stopInsertDragTracking();
+
+        this._stopSwapDragTracking();
+
+        if (this._applyingLayoutTimer) {
+            GLib.source_remove(this._applyingLayoutTimer);
+            this._applyingLayoutTimer = null;
+        }
+
+        if (this._focusSizeSignal) {
+            try { this._focusSizeSignal.window.disconnect(this._focusSizeSignal.id); } catch { }
+            this._focusSizeSignal = null;
+        }
+        if (this._focusCleanupTimer) {
+            GLib.source_remove(this._focusCleanupTimer);
+            this._focusCleanupTimer = null;
+        }
+    }
+
+    _startInsertDragTracking(window, wsIndex) {
+        this._dragTarget = null;
+        this._dragPosition = null;
+
+        this._dragPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            if (!this._dragWindow) return GLib.SOURCE_REMOVE;
+
+            const [mouseX, mouseY] = global.get_pointer();
+            const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
+
+            let newTarget = null;
+            let newPosition = null;
+
+            for (const w of tiledWindows) {
+                if (w === this._dragWindow) continue;
+                const frame = w.get_frame_rect();
+                if (mouseX >= frame.x && mouseX <= frame.x + frame.width &&
+                    mouseY >= frame.y && mouseY <= frame.y + frame.height) {
+                    newTarget = w;
+                    newPosition = this._getDropPosition(w, mouseX, mouseY);
+                    break;
+                }
+            }
+
+            if (newTarget !== this._dragTarget || newPosition !== this._dragPosition) {
+                this._dragTarget = newTarget;
+                this._dragPosition = newPosition;
+                this._updateInsertHighlight(newTarget, newPosition);
+            }
+
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopInsertDragTracking() {
+        if (this._dragPollId) {
+            GLib.source_remove(this._dragPollId);
+            this._dragPollId = null;
+        }
+        this._removeHighlight();
+        this._dragWindow = null;
+        this._dragTarget = null;
+        this._dragPosition = null;
+    }
+
+    _getDropPosition(targetWindow, mouseX, mouseY) {
+        const frame = targetWindow.get_frame_rect();
+        const relX = mouseX - frame.x;
+        const relY = mouseY - frame.y;
+        const w = frame.width;
+        const h = frame.height;
+
+        const leftZone = w * 0.3;
+        const rightZone = w * 0.7;
+        const topZone = h * 0.3;
+        const bottomZone = h * 0.7;
+
+        // Check horizontal zones first
+        if (relX < leftZone) return 'before';
+        if (relX > rightZone) return 'after';
+
+        // Then vertical zones
+        if (relY < topZone) return 'above';
+        if (relY > bottomZone) return 'below';
+
+        // Middle 40% — reserved
+        return null;
+    }
+
+    _startSwapDragTracking(window, wsIndex) {
+        this._dragTarget = null;
+
+        // Poll mouse position every 50ms during drag
+        this._dragPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            if (!this._dragWindow) return GLib.SOURCE_REMOVE;
+
+            const [mouseX, mouseY] = global.get_pointer();
+            const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
+
+            let newTarget = null;
+            for (const w of tiledWindows) {
+                if (w === this._dragWindow) continue;
+                const frame = w.get_frame_rect();
+                if (mouseX >= frame.x && mouseX <= frame.x + frame.width &&
+                    mouseY >= frame.y && mouseY <= frame.y + frame.height) {
+                    newTarget = w;
+                    break;
+                }
+            }
+
+            if (newTarget !== this._dragTarget) {
+                this._dragTarget = newTarget;
+                this._updateSwapHighlight(newTarget);
+            }
+
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopSwapDragTracking() {
+        if (this._dragPollId) {
+            GLib.source_remove(this._dragPollId);
+            this._dragPollId = null;
+        }
+        this._removeHighlight();
+        this._dragWindow = null;
+        this._dragTarget = null;
+    }
+
+    _updateInsertHighlight(window, position) {
+        this._removeHighlight();
+        if (!window || !position) return;
+
+        const frame = window.get_frame_rect();
+        if (!frame || frame.width === 0) return;
+
+        let x, y, width, height;
+
+        switch (position) {
+            case 'before':
+                x = frame.x;
+                y = frame.y;
+                width = Math.floor(frame.width / 2);
+                height = frame.height;
+                break;
+            case 'after':
+                x = frame.x + Math.floor(frame.width / 2);
+                y = frame.y;
+                width = Math.floor(frame.width / 2);
+                height = frame.height;
+                break;
+            case 'above':
+                x = frame.x;
+                y = frame.y;
+                width = frame.width;
+                height = Math.floor(frame.height / 2);
+                break;
+            case 'below':
+                x = frame.x;
+                y = frame.y + Math.floor(frame.height / 2);
+                width = frame.width;
+                height = Math.floor(frame.height / 2);
+                break;
+        }
+
+        this._highlightWidget = new St.Widget({
+            style: 'background-color: rgba(100, 150, 255, 0.35); border: 2px solid rgba(100, 150, 255, 0.9); border-radius: 8px;',
+            reactive: false,
+            x, y, width, height,
+        });
+
+        global.window_group.add_child(this._highlightWidget);
+        global.window_group.set_child_above_sibling(this._highlightWidget, null);
+    }
+
+    _updateSwapHighlight(window) {
+        this._removeHighlight();
+        if (!window) return;
+
+        const frame = window.get_frame_rect();
+        if (!frame || frame.width === 0) return;
+
+        this._highlightWidget = new St.Widget({
+            style: 'background-color: rgba(100, 150, 255, 0.25); border: 2px solid rgba(100, 150, 255, 0.8); border-radius: 12px;',
+            reactive: false,
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+        });
+
+        global.window_group.add_child(this._highlightWidget);
+        global.window_group.set_child_above_sibling(this._highlightWidget, null);
+    }
+
+    _removeHighlight() {
+        if (this._highlightWidget) {
+            this._highlightWidget.destroy();
+            this._highlightWidget = null;
+        }
+    }
+
+    _onInsertDragEnd(window, dragWindow, dragTarget, dragPosition) {
+        if (!dragTarget || !dragWindow || !dragPosition) {
+            this._onGrabOpEnd(window, Meta.GrabOp.MOVING);
+            return;
+        }
+
+        const wsIndex = window.get_workspace().index();
+        this._tracker._tree.insertWindowRelativeTo(dragWindow, dragTarget, dragPosition, wsIndex);
+
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const innerRect = {
+            x: workArea.x + 8, y: workArea.y + 8,
+            width: workArea.width - 16, height: workArea.height - 16,
+        };
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        layout.forEach(({ window: w, x, y, width, height }) => {
+            if (w === dragWindow) return;
+            this._animateWindow(w, x, y, width, height);
+        });
+
+        const dragTarget2 = layout.find(l => l.window === dragWindow);
+        if (dragTarget2) {
+            this._moveWindow(dragWindow, dragTarget2.x, dragTarget2.y, dragTarget2.width, dragTarget2.height);
+        }
+    }
+
+    _onSwapDragEnd(window, dragWindow, dragTarget) {
+        if (!dragTarget || !dragWindow) {
+            this._onGrabOpEnd(window, Meta.GrabOp.MOVING);
+            return;
+        }
+
+        const wsIndex = window.get_workspace().index();
+        this._tracker._tree.swapWindows(dragWindow, dragTarget, wsIndex);
+
+        // Animate both windows to their new positions
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const innerRect = {
+            x: workArea.x + 8, y: workArea.y + 8,
+            width: workArea.width - 16, height: workArea.height - 16,
+        };
+        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        layout.forEach(({ window: w, x, y, width, height }) => {
+            if (w === dragWindow) return; // dragged window already at drop position
+            this._animateWindow(w, x, y, width, height);
+        });
+
+        // Move dragged window directly without animation
+        const dragTarget2 = layout.find(l => l.window === dragWindow);
+        if (dragTarget2) {
+            this._moveWindow(dragWindow, dragTarget2.x, dragTarget2.y, dragTarget2.width, dragTarget2.height);
+        }
+    }
+
+    setDragMode(mode) {
+        this._dragMode = mode;
+        console.log(`[Tiler] drag mode: ${mode}`);
     }
 
     _startCornerResize(window, grabOp, root, innerRect, wsIndex) {
@@ -209,6 +520,7 @@ export class TileManager {
     }
 
     _startLiveResize(window, grabOp) {
+        if (this._tracker._floatingWindows.has(window)) return;
         this._stopLiveResize();
         this._isResizing = true;
         this._lastTempRatios = null;
@@ -368,6 +680,15 @@ export class TileManager {
     }
 
     _onFocusChanged() {
+        if (this._focusSizeSignal) {
+            try { this._focusSizeSignal.window.disconnect(this._focusSizeSignal.id); } catch { }
+            this._focusSizeSignal = null;
+        }
+        if (this._focusCleanupTimer) {
+            GLib.source_remove(this._focusCleanupTimer);
+            this._focusCleanupTimer = null;
+        }
+
         const focused = global.display.focus_window;
         if (!focused) return;
 
@@ -379,8 +700,8 @@ export class TileManager {
 
         const id = focused.connect('size-changed', () => {
             focused.disconnect(id);
+            this._focusSizeSignal = null;
 
-            // Don't snap if we are the ones moving the window
             if (this._applyingLayout) return;
 
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
@@ -404,14 +725,26 @@ export class TileManager {
             });
         });
 
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-            try { focused.disconnect(id); } catch { }
+        this._focusSizeSignal = { window: focused, id };
+
+        this._focusCleanupTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            if (this._focusSizeSignal?.id === id) {
+                try { focused.disconnect(id); } catch { }
+                this._focusSizeSignal = null;
+            }
+            this._focusCleanupTimer = null;
             return GLib.SOURCE_REMOVE;
         });
     }
 
     _applyLayout(wsIndex) {
         this._applyingLayout = true;
+
+        if (this._applyingLayoutTimer) {
+            GLib.source_remove(this._applyingLayoutTimer);
+            this._applyingLayoutTimer = null;
+        }
+
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const innerRect = {
@@ -426,9 +759,9 @@ export class TileManager {
             this._moveWindow(window, x, y, width, height);
         });
 
-        // Clear flag after Mutter processes the moves
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+        this._applyingLayoutTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
             this._applyingLayout = false;
+            this._applyingLayoutTimer = null;
             return GLib.SOURCE_REMOVE;
         });
     }

@@ -56,6 +56,26 @@ export class Keybindings {
                 this._tracker.toggleFloat(focused);
             }
         );
+
+        Main.wm.addKeybinding(
+            'drag-mode-swap',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => {
+                this._tileManager.setDragMode('swap');
+            }
+        );
+
+        Main.wm.addKeybinding(
+            'drag-mode-insert',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => {
+                this._tileManager.setDragMode('insert');
+            }
+        );
     }
 
     _retileAll(wsIndex) {
@@ -95,5 +115,7 @@ export class Keybindings {
         Main.wm.removeKeybinding('split-horizontal');
         Main.wm.removeKeybinding('split-vertical');
         Main.wm.removeKeybinding('toggle-float');
+        Main.wm.removeKeybinding('drag-mode-swap');
+        Main.wm.removeKeybinding('drag-mode-insert');
     }
 }

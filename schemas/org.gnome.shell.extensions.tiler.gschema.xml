@@ -17,5 +17,13 @@
             <default>['&lt;Super&gt;f']</default>
             <summary>Toggle window floating</summary>
         </key>
+        <key name="drag-mode-swap" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;c']</default>
+            <summary>Set drag mode to swap</summary>
+        </key>
+        <key name="drag-mode-insert" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;x']</default>
+            <summary>Set drag mode to insert</summary>
+        </key>
     </schema>
 </schemalist>
