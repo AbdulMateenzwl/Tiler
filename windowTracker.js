@@ -30,6 +30,18 @@ export class WindowTracker extends EventEmitter {
             })
         );
 
+        this._displaySignals.push(
+            global.workspace_manager.connect('workspace-removed', (_, wsIndex) => {
+                this._onWorkspaceRemoved(wsIndex);
+            })
+        );
+
+        this._displaySignals.push(
+            global.workspace_manager.connect('workspace-added', (_, wsIndex) => {
+                this._onWorkspaceAdded(wsIndex);
+            })
+        );
+
         const existing = global.display.list_all_windows().filter(w => this._shouldTrack(w));
         console.log(`[Tiler] enable: found ${existing.length} existing windows`);
         existing.forEach(window => {
@@ -42,8 +54,11 @@ export class WindowTracker extends EventEmitter {
         this._displaySignals.forEach(id => global.display.disconnect(id));
         this._displaySignals = [];
 
-        for (const [window, signals] of this._windowSignals) {
-            signals.forEach(id => window.disconnect(id));
+        for (const [window, entry] of this._windowSignals) {
+            entry.windowSignals.forEach(id => window.disconnect(id));
+            entry.trackerSignals.forEach(id => {
+                try { this.disconnect(id); } catch { }
+            });
         }
         this._windowSignals.clear();
 
@@ -69,6 +84,62 @@ export class WindowTracker extends EventEmitter {
             }
             this._unmaximizeStore.clear();
         }
+    }
+
+    _onWorkspaceRemoved(removedWsIndex) {
+        console.log(`[Tiler] workspace-removed: wsIndex=${removedWsIndex}`);
+
+        // Shift all roots with index > removedWsIndex down by 1
+        const newRoots = new Map();
+        for (const [idx, root] of this._tree._roots) {
+            if (idx < removedWsIndex) {
+                newRoots.set(idx, root);
+            } else if (idx === removedWsIndex) {
+                // This workspace was removed — discard its tree
+                // Windows should already be gone since GNOME only removes empty workspaces
+                console.log(`[Tiler] dropping tree for removed workspace ${idx}`);
+            } else {
+                // Shift down by 1
+                newRoots.set(idx - 1, root);
+            }
+        }
+        this._tree._roots = newRoots;
+
+        // Also shift pending splits
+        const newPending = new Map();
+        for (const [idx, direction] of this._tree._pendingSplitDirection) {
+            if (idx < removedWsIndex) {
+                newPending.set(idx, direction);
+            } else if (idx > removedWsIndex) {
+                newPending.set(idx - 1, direction);
+            }
+            // idx === removedWsIndex is dropped
+        }
+        this._tree._pendingSplitDirection = newPending;
+
+        // Update savedWsIndex for all tracked windows
+        // savedWsIndex is a closure variable inside _connectWindowSignals
+        // so we emit a signal to let windows know their index shifted
+        this.emit('workspaces-shifted', removedWsIndex);
+    }
+
+    _onWorkspaceAdded(addedWsIndex) {
+        // Only shift if workspace inserted before existing ones
+        // GNOME typically appends at the end so this is usually a no-op
+        const maxExisting = Math.max(...this._tree._roots.keys(), -1);
+        if (addedWsIndex > maxExisting) return; // appended at end — no shift needed
+
+        const newRoots = new Map();
+        for (const [idx, root] of this._tree._roots) {
+            newRoots.set(idx >= addedWsIndex ? idx + 1 : idx, root);
+        }
+        this._tree._roots = newRoots;
+
+        const newPending = new Map();
+        for (const [idx, direction] of this._tree._pendingSplitDirection) {
+            newPending.set(idx >= addedWsIndex ? idx + 1 : idx, direction);
+        }
+        this._tree._pendingSplitDirection = newPending;
     }
 
     getWindowsForWorkspace(wsIndex) {
@@ -184,6 +255,9 @@ export class WindowTracker extends EventEmitter {
 
     _addToTiling(window) {
         const wsIndex = window.get_workspace().index();
+        const existing = this._tree.findLeaf(window, null, wsIndex);
+        console.log(`[Tiler] addToTiling: "${window.get_title()}" wsIndex=${wsIndex} alreadyInTree=${!!existing}`);
+
         if (this._tree.findLeaf(window, null, wsIndex)) return;
 
         const focusedWindow = global.display.focus_window;
@@ -204,9 +278,10 @@ export class WindowTracker extends EventEmitter {
         if (this._windowSignals.has(window)) return;
 
         let savedWsIndex = window.get_workspace().index();
-        const signals = [];
+        const windowSignals = [];
+        const trackerSignals = [];
 
-        signals.push(window.connect('unmanaged', () => {
+        windowSignals.push(window.connect('unmanaged', () => {
             console.log(`[Tiler] unmanaged: "${window.get_title()}" ws=${savedWsIndex}`);
             console.log(`[Tiler] tree before: ${JSON.stringify(this._tree.getWindows(savedWsIndex).map(w => w.get_title()))}`);
             this._tree.removeWindow(window, savedWsIndex);
@@ -222,7 +297,7 @@ export class WindowTracker extends EventEmitter {
             this.emit('window-removed', window, savedWsIndex);
         }));
 
-        signals.push(window.connect('notify::minimized', () => {
+        windowSignals.push(window.connect('notify::minimized', () => {
             if (window.minimized) {
                 const wsIndex = window.get_workspace().index();
 
@@ -244,7 +319,7 @@ export class WindowTracker extends EventEmitter {
             }
         }));
 
-        signals.push(window.connect('workspace-changed', () => {
+        windowSignals.push(window.connect('workspace-changed', () => {
             const ws = window.get_workspace();
             if (!ws) return;
             const newWsIndex = ws.index();
@@ -253,7 +328,7 @@ export class WindowTracker extends EventEmitter {
             savedWsIndex = newWsIndex;
         }));
 
-        signals.push(window.connect('notify::maximized-horizontally', () => {
+        windowSignals.push(window.connect('notify::maximized-horizontally', () => {
             const maximized = window.get_maximized();
             const wsIndex = window.get_workspace().index();
 
@@ -273,7 +348,6 @@ export class WindowTracker extends EventEmitter {
                 // TODO: if we want to support this, we'll need to track it separately from full maximize and restore to the correct state on unmaximize
                 return;
             } else if (maximized === 0 && this._maximizedWindows.has(window)) {
-                // Only restore if we actually tracked this as maximized
                 this._maximizedWindows.delete(window);
                 this._tree.restoreNode(window, wsIndex);
                 this._recentlyUnmaximized.add(window);
@@ -283,20 +357,42 @@ export class WindowTracker extends EventEmitter {
                 });
                 this.emit('window-added', window, wsIndex);
                 this.emit('window-unmaximized', window, wsIndex);
+            } else if (maximized === 0 && !this._maximizedWindows.has(window)) {
+                const leaf = this._tree.findLeaf(window, this._tree.getRoot(wsIndex));
+                if (!leaf) {
+                    if (this._shouldTrack(window)) {
+                        this._addToTiling(window);
+                    }
+                } else if (leaf.ratio === 0) {
+                    // In tree but collapsed — restore it
+                    this._tree.restoreNode(window, wsIndex);
+                    this.emit('window-added', window, wsIndex);
+                }
             }
         }));
 
-        this._windowSignals.set(window, signals);
+        // Listen for workspace shifts on tracker itself
+        trackerSignals.push(this.connect('workspaces-shifted', (_, removedWsIndex) => {
+            if (savedWsIndex > removedWsIndex) {
+                savedWsIndex -= 1;
+            }
+        }));
+
+
+        this._windowSignals.set(window, { windowSignals, trackerSignals });
     }
 
     _disconnectWindowSignals(window) {
-        const signals = this._windowSignals.get(window);
-        if (!signals) return;
-        signals.forEach(id => {
-            try {
-                window.disconnect(id);
-            } catch { }
+        const entry = this._windowSignals.get(window);
+        if (!entry) return;
+
+        entry.windowSignals.forEach(id => {
+            try { window.disconnect(id); } catch { }
         });
+        entry.trackerSignals.forEach(id => {
+            try { this.disconnect(id); } catch { }
+        });
+
         this._windowSignals.delete(window);
     }
 
@@ -344,9 +440,12 @@ export class WindowTracker extends EventEmitter {
 
     _watchForUnmaximize(window) {
         const id = window.connect('notify::maximized-horizontally', () => {
-            if (window.get_maximized() === 0) {
+            const maximized = window.get_maximized();
+            console.log(`[Tiler] watchForUnmaximize fired: "${window.get_title()}" maximized=${maximized}`);
+            if (maximized === 0) {
                 window.disconnect(id);
-                this._unmaximizeStore.delete(window);
+                this._unmaximizeStore?.delete(window);
+                console.log(`[Tiler] watchForUnmaximize: shouldTrack=${this._shouldTrack(window)}`);
                 if (this._shouldTrack(window))
                     this._addToTiling(window);
             }
@@ -357,14 +456,20 @@ export class WindowTracker extends EventEmitter {
 
     _onWindowCreated(window) {
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            const maximized = window.get_maximized();
-            if (this._shouldTrack(window)) {
-                this._addToTiling(window);
-            } else if (window.get_window_type() === Meta.WindowType.NORMAL
-                && !window.is_skip_taskbar()
-                && maximized !== 0) {
-                this._watchForUnmaximize(window);
-            }
+            // Wait one more tick for window state to settle
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+                const maximized = window.get_maximized();
+                console.log(`[Tiler] onWindowCreated: "${window.get_title()}" maximized=${maximized} shouldTrack=${this._shouldTrack(window)}`);
+
+                if (this._shouldTrack(window)) {
+                    this._addToTiling(window);
+                } else if (window.get_window_type() === Meta.WindowType.NORMAL
+                    && !window.is_skip_taskbar()
+                    && maximized !== 0) {
+                    this._watchForUnmaximize(window);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
             return GLib.SOURCE_REMOVE;
         });
     }

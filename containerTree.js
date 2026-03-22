@@ -293,6 +293,9 @@ export class ContainerTree {
         const parent = this.findParent(nodeId, root);
         if (!parent) return;
 
+        // Never collapse the root itself
+        if (parent === root) return;
+
         const allZero = parent.children.every(c => c.ratio === 0);
         if (allZero) {
             if (parent.ratio > 0) {
