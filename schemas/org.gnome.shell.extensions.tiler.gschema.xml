@@ -1,3 +1,4 @@
+
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
     <schema id="org.gnome.shell.extensions.tiler" path="/org/gnome/shell/extensions/tiler/">
@@ -6,7 +7,7 @@
             <summary>Retile all windows</summary>
         </key>
         <key name="split-horizontal" type="as">
-            <default>['&lt;Super&gt;&lt;Shift&gt;h']</default>
+            <default>['&lt;Super&gt;&lt;Shift&gt;b']</default>
             <summary>Split next window horizontally</summary>
         </key>
         <key name="split-vertical" type="as">
@@ -40,6 +41,26 @@
         <key name="focus-down" type="as">
             <default>['&lt;Super&gt;j']</default>
             <summary>Focus window below</summary>
+        </key>
+        <key name="toggle-resize-mode" type="as">
+            <default>['&lt;Super&gt;Return']</default>
+            <summary>Toggle keyboard resize mode</summary>
+        </key>
+        <key name="resize-left" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;h']</default>
+            <summary>Resize window left (grow left)</summary>
+        </key>
+        <key name="resize-right" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;l']</default>
+            <summary>Resize window right (grow right)</summary>
+        </key>
+        <key name="resize-up" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;k']</default>
+            <summary>Resize window up (grow up)</summary>
+        </key>
+        <key name="resize-down" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;j']</default>
+            <summary>Resize window down (grow down)</summary>
         </key>
     </schema>
 </schemalist>

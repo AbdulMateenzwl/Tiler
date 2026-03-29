@@ -170,6 +170,9 @@ export class WindowTracker extends EventEmitter {
         const wsIndex = window.get_workspace().index();
 
         if (this._floatingWindows.has(window)) {
+            // Don't untile if floating window is currently maximized
+            if (window.get_maximized() !== 0) return;
+
             // Window is floating — retile it
             this._floatingWindows.delete(window);
 
@@ -189,17 +192,61 @@ export class WindowTracker extends EventEmitter {
         } else {
             // Window is tiled — float it
             const leaf = this._tree.findLeaf(window, this._tree.getRoot(wsIndex));
-            if (!leaf || leaf.ratio === 0) return;
+            if (!leaf) return;
 
-            this._floatingWindows.add(window);
-            this._tree.collapseNode(window, wsIndex);
-            this._disconnectWindowSignals(window);
-            this.emit('window-removed', window, wsIndex);
-            this.emit('window-floating', window, wsIndex);
+            if (window.get_maximized() !== 0) {
+                console.log(`[Tiler] toggleFloat: window is maximized=${window.get_maximized()} — unmaximizing first`);
 
-            this._resizeToFloat(window, wsIndex);
-            this._watchFloatingWindow(window, wsIndex);
+                // Connect listener FIRST before anything else
+                const id = window.connect('notify::maximized-horizontally', () => {
+                    console.log(`[Tiler] toggleFloat: unmaximize signal fired maximized=${window.get_maximized()}`);
+                    if (window.get_maximized() === 0) {
+                        window.disconnect(id);
+                        console.log(`[Tiler] toggleFloat: now floating window`);
+                        this._tree.restoreNode(window, wsIndex);
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+                            this._floatWindow(window, wsIndex);
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    }
+                });
+
+                // Now remove from tracking and disconnect window signals
+                this._maximizedWindows.delete(window);
+                this._disconnectWindowSignals(window);
+
+                // Unmaximize last
+                window.unmaximize(Meta.MaximizeFlags.BOTH);
+                return;
+            }
+
+            // Window is normal tiled — float directly
+            if (leaf.ratio === 0) return;
+            this._floatWindow(window, wsIndex);
         }
+    }
+
+    _floatWindow(window, wsIndex) {
+        const leaf = this._tree.findLeaf(window, this._tree.getRoot(wsIndex));
+        console.log(`[Tiler] _floatWindow: "${window.get_title()}" leaf=${!!leaf} leafRatio=${leaf?.ratio}`);
+        if (!leaf) return;
+
+        this._floatingWindows.add(window);
+        this._tree.collapseNode(window, wsIndex);
+        this._disconnectWindowSignals(window);
+        this.emit('window-removed', window, wsIndex);
+        this.emit('window-floating', window, wsIndex);
+
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            const frame = window.get_frame_rect();
+            console.log(`[Tiler] _floatWindow: before resize frame=${frame.x},${frame.y} ${frame.width}x${frame.height}`);
+            this._resizeToFloat(window, wsIndex);
+            const frame2 = window.get_frame_rect();
+            console.log(`[Tiler] _floatWindow: after resize frame=${frame2.x},${frame2.y} ${frame2.width}x${frame2.height}`);
+            return GLib.SOURCE_REMOVE;
+        });
+
+        this._watchFloatingWindow(window, wsIndex);
     }
 
     _resizeToFloat(window, wsIndex) {
@@ -210,6 +257,7 @@ export class WindowTracker extends EventEmitter {
         const x = workArea.x + Math.floor((workArea.width - FLOAT_WIDTH) / 2);
         const y = workArea.y + Math.floor((workArea.height - FLOAT_HEIGHT) / 2);
 
+        console.log(`[Tiler] _resizeToFloat: "${window.get_title()}" target=${x},${y} ${FLOAT_WIDTH}x${FLOAT_HEIGHT}`);
         window.move_resize_frame(false, x, y, FLOAT_WIDTH, FLOAT_HEIGHT);
     }
 
@@ -386,12 +434,20 @@ export class WindowTracker extends EventEmitter {
         const entry = this._windowSignals.get(window);
         if (!entry) return;
 
-        entry.windowSignals.forEach(id => {
-            try { window.disconnect(id); } catch { }
-        });
-        entry.trackerSignals.forEach(id => {
-            try { this.disconnect(id); } catch { }
-        });
+        if (Array.isArray(entry)) {
+            // Old format — plain array of window signal ids
+            entry.forEach(id => {
+                try { window.disconnect(id); } catch { }
+            });
+        } else {
+            // New format — {windowSignals, trackerSignals}
+            entry.windowSignals?.forEach(id => {
+                try { window.disconnect(id); } catch { }
+            });
+            entry.trackerSignals?.forEach(id => {
+                try { this.disconnect(id); } catch { }
+            });
+        }
 
         this._windowSignals.delete(window);
     }
@@ -439,39 +495,70 @@ export class WindowTracker extends EventEmitter {
     }
 
     _watchForUnmaximize(window) {
+        // Guard — if already watching, disconnect old one first
+        const existing = this._unmaximizeStore?.get(window);
+        if (existing) {
+            try { window.disconnect(existing); } catch { }
+        }
+
         const id = window.connect('notify::maximized-horizontally', () => {
             const maximized = window.get_maximized();
-            console.log(`[Tiler] watchForUnmaximize fired: "${window.get_title()}" maximized=${maximized}`);
             if (maximized === 0) {
-                window.disconnect(id);
+                try { window.disconnect(id); } catch { }
                 this._unmaximizeStore?.delete(window);
-                console.log(`[Tiler] watchForUnmaximize: shouldTrack=${this._shouldTrack(window)}`);
-                if (this._shouldTrack(window))
-                    this._addToTiling(window);
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                    if (window.get_maximized() === 0 && this._shouldTrack(window)) {
+                        this._addToTiling(window);
+                    }
+                    return GLib.SOURCE_REMOVE;
+                });
             }
         });
+
         this._unmaximizeStore = this._unmaximizeStore ?? new Map();
         this._unmaximizeStore.set(window, id);
     }
 
     _onWindowCreated(window) {
+        // Capture focused window and pending split immediately — before any delay
+        const wsIndex = window.get_workspace()?.index() ?? 0;
+        const focusedWindow = global.display.focus_window;
+        const capturedFocus = focusedWindow !== window ? focusedWindow : null;
+        const hasPendingSplit = this._tree._pendingSplitDirection.has(wsIndex);
+        const pendingSplitDir = hasPendingSplit ? this._tree.getPendingSplit(wsIndex) : null;
+
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            // Wait one more tick for window state to settle
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
                 const maximized = window.get_maximized();
                 console.log(`[Tiler] onWindowCreated: "${window.get_title()}" maximized=${maximized} shouldTrack=${this._shouldTrack(window)}`);
 
-                if (this._shouldTrack(window)) {
-                    this._addToTiling(window);
-                } else if (window.get_window_type() === Meta.WindowType.NORMAL
+                if (window.get_window_type() === Meta.WindowType.NORMAL
                     && !window.is_skip_taskbar()
                     && maximized !== 0) {
                     this._watchForUnmaximize(window);
+                    return GLib.SOURCE_REMOVE;
                 }
+
+                if (this._shouldTrack(window)) {
+                    // Restore pending split before adding — it may have been cleared during delay
+                    if (pendingSplitDir) {
+                        this._tree.setPendingSplit(wsIndex, pendingSplitDir);
+                    }
+                    this._addToTilingWithFocus(window, wsIndex, capturedFocus);
+                }
+
                 return GLib.SOURCE_REMOVE;
             });
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    _addToTilingWithFocus(window, wsIndex, focusedWindow) {
+        if (this._tree.findLeaf(window, null, wsIndex)) return;
+
+        this._tree.insertWindow(window, wsIndex, focusedWindow);
+        this._connectWindowSignals(window);
+        this.emit('window-added', window, wsIndex);
     }
 
     addWindowToTiling(window) {

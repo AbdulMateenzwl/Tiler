@@ -3,6 +3,7 @@ import { WindowTracker } from './windowTracker.js';
 import { TileManager } from './tileManager.js';
 import { Keybindings } from './keybindings.js';
 import { BorderManager } from './borderManager.js';
+import { ResizeManager } from './resizeManager.js';
 
 export default class TilerExtension extends Extension {
     enable() {
@@ -14,7 +15,10 @@ export default class TilerExtension extends Extension {
         this._tileManager = new TileManager(this._tracker);
         this._tileManager.enable();
 
-        this._keybindings = new Keybindings(this._tileManager, this._tracker, settings);
+        this._resizeManager = new ResizeManager(this._tracker);
+        this._resizeManager.enable();
+
+        this._keybindings = new Keybindings(this._tileManager, this._tracker, settings, this._resizeManager);
         this._keybindings.enable();
 
         this._borderManager = new BorderManager();
@@ -30,6 +34,7 @@ export default class TilerExtension extends Extension {
         });
 
         this._tracker.connect('window-floating', (_, window) => {
+            console.log(`[Tiler] extension: window-floating "${window.get_title()}" → setFloatingBorder`);
             this._borderManager.setFloatingBorder(window);
         });
 
@@ -48,6 +53,9 @@ export default class TilerExtension extends Extension {
     disable() {
         this._keybindings.disable();
         this._keybindings = null;
+
+        this._resizeManager.disable();
+        this._resizeManager = null;
 
         this._tileManager.disable();
         this._tileManager = null;

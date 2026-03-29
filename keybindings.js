@@ -1,3 +1,4 @@
+
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -5,10 +6,11 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { LayoutEngine } from './layoutEngine.js';
 
 export class Keybindings {
-    constructor(tileManager, tracker, settings) {
+    constructor(tileManager, tracker, settings, resizeManager) {
         this._tileManager = tileManager;
         this._tracker = tracker;
         this._settings = settings;
+        this._resizeManager = resizeManager;
     }
 
     enable() {
@@ -109,6 +111,35 @@ export class Keybindings {
                 }
             );
         });
+
+        Main.wm.addKeybinding(
+            'toggle-resize-mode',
+            this._settings,
+            Meta.KeyBindingFlags.NONE,
+            Shell.ActionMode.NORMAL,
+            () => {
+                console.log(`[Tiler] toggle resize mode`);
+                const focused = global.display.focus_window;
+                this._resizeManager.toggleResizeMode(focused);
+            }
+        );
+
+        // Resize direction bindings — only active when in resize mode
+        const resizeKeys = ['resize-left', 'resize-right', 'resize-up', 'resize-down'];
+        const resizeDirs = ['left', 'right', 'up', 'down'];
+
+        resizeKeys.forEach((key, i) => {
+            Main.wm.addKeybinding(
+                key,
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL,
+                () => {
+                    if (!this._resizeManager.isInResizeMode()) return;
+                    this._resizeManager.resizeInDirection(resizeDirs[i]);
+                }
+            );
+        });
     }
 
     _retileAll(wsIndex) {
@@ -152,6 +183,11 @@ export class Keybindings {
         Main.wm.removeKeybinding('drag-mode-insert');
 
         ['focus-left', 'focus-right', 'focus-up', 'focus-down'].forEach(key => {
+            Main.wm.removeKeybinding(key);
+        });
+
+        Main.wm.removeKeybinding('toggle-resize-mode');
+        ['resize-left', 'resize-right', 'resize-up', 'resize-down'].forEach(key => {
             Main.wm.removeKeybinding(key);
         });
     }

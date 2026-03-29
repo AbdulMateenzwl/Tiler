@@ -98,7 +98,11 @@ export class BorderManager {
     }
 
     setFloatingBorder(window) {
-        this._ensureBorder(window, 'floating');
+        // Small delay to let window settle after float transition
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            this._ensureBorder(window, 'floating');
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     setTiledBorder(window) {
