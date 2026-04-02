@@ -1,6 +1,7 @@
 // borderManager.js
 import St from 'gi://St';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 
 const BORDER_WIDTH = 2;
 
@@ -206,6 +207,10 @@ export class BorderManager {
         const currentWs = global.workspace_manager.get_active_workspace_index();
 
         if (focused && !this._borders.has(focused)) {
+            // Only create borders for normal windows
+            if (focused.get_window_type() !== Meta.WindowType.NORMAL) return;
+            if (focused.is_skip_taskbar()) return;
+
             const frame = focused.get_frame_rect();
             if (frame && frame.width > 0 && focused.get_maximized() === 0) {
                 this._ensureBorder(focused, 'focused');
