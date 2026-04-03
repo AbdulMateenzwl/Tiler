@@ -1,8 +1,17 @@
 {
   "name": "Tiler",
   "description": "Custom tiling extension",
-  "uuid": "tiler@yourname",
-  "shell-version": ["48"],
-  "session-modes": ["user"],
+  "uuid": "tiler@abdulmateenzwl",
+  "settings-schema": "org.gnome.shell.extensions.tiler",
+  "shell-version": [
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "session-modes": [
+    "user"
+  ],
   "version": 1
 }

@@ -34,6 +34,10 @@ export class ResizeManager {
         return this._settings.get_int('gap-size');
     }
 
+    get _borderRadius() {
+        return this._settings.get_int('border-radius');
+    }
+
     // ─── Public API ──────────────────────────────────────────────────────────────
 
     isInResizeMode() {
@@ -76,7 +80,7 @@ export class ResizeManager {
         if (!frame || frame.width === 0) return;
 
         this._indicator = new St.Widget({
-            style: 'border: 3px solid rgba(255, 100, 100, 0.9); border-radius: 12px; background-color: rgba(255, 100, 100, 0.08);',
+            style: `border: 3px solid rgba(255, 100, 100, 0.9); border-radius: ${this._borderRadius}px; background-color: rgba(255, 100, 100, 0.08);`,
             reactive: false,
             x: frame.x - 3,
             y: frame.y - 3,
