@@ -1,12 +1,7 @@
-
 // resizeManager.js
 import St from 'gi://St';
 import GLib from 'gi://GLib';
 import { LayoutEngine } from './layoutEngine.js';
-
-// Pixel steps per keypress
-const RESIZE_STEP_H = 50; // horizontal
-const RESIZE_STEP_V = 50; // vertical
 
 export class ResizeManager {
     constructor(tracker, settings) {
@@ -17,11 +12,15 @@ export class ResizeManager {
         this._settings = settings;
     }
 
+    // No display/tracker signals needed — resizing is driven by keybindings
+    // routed through the extension's key handler, not by GNOME grab events.
     enable() { }
 
     disable() {
         this._exitResizeMode();
     }
+
+    // ─── Settings Accessors ──────────────────────────────────────────────────────
 
     get _stepH() {
         return this._settings.get_int('resize-step-h');
@@ -31,9 +30,11 @@ export class ResizeManager {
         return this._settings.get_int('resize-step-v');
     }
 
-    get _gap(){
+    get _gap() {
         return this._settings.get_int('gap-size');
     }
+
+    // ─── Public API ──────────────────────────────────────────────────────────────
 
     isInResizeMode() {
         return this._resizeMode;
@@ -46,6 +47,8 @@ export class ResizeManager {
             this._enterResizeMode(window);
         }
     }
+
+    // ─── Resize Mode Enter / Exit ────────────────────────────────────────────────
 
     _enterResizeMode(window) {
         if (!window) return;
@@ -63,6 +66,8 @@ export class ResizeManager {
         this._hideIndicator();
         console.log(`[Tiler] resize mode: exited`);
     }
+
+    // ─── Indicator ───────────────────────────────────────────────────────────────
 
     _showIndicator(window) {
         this._hideIndicator();
@@ -82,7 +87,6 @@ export class ResizeManager {
         global.window_group.add_child(this._indicator);
         global.window_group.set_child_above_sibling(this._indicator, null);
 
-        // Update indicator position as window moves
         const actor = window.get_compositor_private();
         if (actor) {
             this._indicatorSignal = actor.connect('notify::position', () => {
@@ -112,6 +116,8 @@ export class ResizeManager {
         }
     }
 
+    // ─── Resize Logic ────────────────────────────────────────────────────────────
+
     resizeInDirection(direction, shrink = false) {
         if (!this._resizeMode || !this._resizeWindow) return;
 
@@ -124,11 +130,7 @@ export class ResizeManager {
         }
 
         const root = this._tracker.getRootForWorkspace(wsIndex);
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const innerRect = {
-            x: workArea.x + this._gap, y: workArea.y + this._gap,
-            width: workArea.width - this._gap * 2, height: workArea.height - this._gap * 2,
-        };
+        const innerRect = LayoutEngine.innerRect(wsIndex, this._gap);
 
         const isHorizontal = direction === 'left' || direction === 'right';
         const requiredDirection = isHorizontal ? 'horizontal' : 'vertical';
@@ -136,13 +138,12 @@ export class ResizeManager {
         const leaf = this._tracker._tree.findLeaf(window, root);
         if (!leaf) return;
 
-        // Walk up tree to find resize edge — handles cross-container resizing
         const resizeEdge = this._findResizeEdge(leaf, root, direction, requiredDirection);
         if (!resizeEdge) return;
 
         const { targetChild, neighbour, parent } = resizeEdge;
 
-        const parentRect = this._getContainerRect(parent, root, innerRect);
+        const parentRect = LayoutEngine.getContainerRect(parent, root, innerRect, this._gap);
         if (!parentRect) return;
 
         const visibleSiblings = parent.children.filter(c => c.ratio > 0);
@@ -239,14 +240,14 @@ export class ResizeManager {
                 break;
             case 'left':
                 width += sign * stepH;
-                x -= sign * stepH; // move left edge
+                x -= sign * stepH;
                 break;
             case 'down':
                 height += sign * stepV;
                 break;
             case 'up':
                 height += sign * stepV;
-                y -= sign * stepV; // move top edge
+                y -= sign * stepV;
                 break;
         }
 
@@ -255,46 +256,4 @@ export class ResizeManager {
         window.move_resize_frame(false, x, y, width, height);
         this._syncIndicator(window);
     }
-
-    _findParentWithDirection(node, root, direction) {
-        const parent = this._tracker._tree.findParent(node.id, root);
-        if (!parent) return null;
-        if (parent.direction === direction) return parent;
-        return this._findParentWithDirection(parent, root, direction);
-    }
-
-    _findDirectChildContaining(parent, leaf) {
-        for (const child of parent.children) {
-            if (child === leaf) return child;
-            if (child.type === 'container') {
-                if (this._tracker._tree.findNodeById(leaf.id, child)) return child;
-            }
-        }
-        return null;
-    }
-
-    _getContainerRect(container, root, innerRect) {
-        const layout = LayoutEngine.calculate(root, innerRect, this._gap);
-        const children = [];
-        this._collectLayoutForContainer(container, layout, children);
-        if (children.length === 0) return null;
-        const minX = Math.min(...children.map(l => l.x));
-        const maxX = Math.max(...children.map(l => l.x + l.width));
-        const minY = Math.min(...children.map(l => l.y));
-        const maxY = Math.max(...children.map(l => l.y + l.height));
-        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-    }
-
-    _collectLayoutForContainer(container, layout, results) {
-        if (container.type === 'leaf') {
-            const found = layout.find(l => l.window === container.window);
-            if (found) results.push(found);
-            return;
-        }
-        for (const child of container.children) {
-            this._collectLayoutForContainer(child, layout, results);
-        }
-    }
 }
-
-

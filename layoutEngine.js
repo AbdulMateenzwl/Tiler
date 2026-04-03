@@ -10,7 +10,7 @@ export class LayoutEngine {
      */
     static calculate(node, rect, gap = 8) {
         if (node.type === 'leaf') {
-            if (node.ratio === 0) return []; 
+            if (node.ratio === 0) return [];
             return [{
                 window: node.window,
                 x: rect.x,
@@ -58,4 +58,57 @@ export class LayoutEngine {
         const monitor = global.display.get_primary_monitor();
         return workspace.get_work_area_for_monitor(monitor);
     }
+
+    static innerRect(wsIndex, gap) {
+        const workArea = LayoutEngine.getWorkArea(wsIndex);
+        return {
+            x: workArea.x + gap,
+            y: workArea.y + gap,
+            width: workArea.width - gap * 2,
+            height: workArea.height - gap * 2,
+        };
+    }
+
+    static findParentWithDirection(node, root, direction, tree) {
+        const parent = tree.findParent(node.id, root);
+        if (!parent) return null;
+        if (parent.direction === direction) return parent;
+        return LayoutEngine.findParentWithDirection(parent, root, direction, tree);
+    }
+
+    static findDirectChildContaining(parent, leaf, tree) {
+        for (const child of parent.children) {
+            if (child === leaf) return child;
+            if (child.type === 'container') {
+                if (tree.findNodeById(leaf.id, child)) return child;
+            }
+        }
+        return null;
+    }
+
+    static getContainerRect(container, root, innerRect, gap) {
+        const layout = LayoutEngine.calculate(root, innerRect, gap);
+        const children = [];
+        LayoutEngine._collectLayoutForContainer(container, layout, children);
+        if (children.length === 0) return null;
+
+        const minX = Math.min(...children.map(l => l.x));
+        const maxX = Math.max(...children.map(l => l.x + l.width));
+        const minY = Math.min(...children.map(l => l.y));
+        const maxY = Math.max(...children.map(l => l.y + l.height));
+
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    static _collectLayoutForContainer(container, layout, results) {
+        if (container.type === 'leaf') {
+            const found = layout.find(l => l.window === container.window);
+            if (found) results.push(found);
+            return;
+        }
+        for (const child of container.children) {
+            LayoutEngine._collectLayoutForContainer(child, layout, results);
+        }
+    }
+
 }

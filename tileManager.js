@@ -5,6 +5,33 @@ import Meta from 'gi://Meta';
 import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
+// Named sets for GNOME grab-op numeric codes.
+// These are undocumented internal values from Meta — grouping them here
+// keeps the classification methods readable and avoids magic numbers scattered
+// throughout the file.
+const GrabOps = {
+    KEYBOARD_MOVING: 1025,
+
+    // Edge resizes (mouse only)
+    TOP: new Set([32769, 33793]),
+    BOTTOM: new Set([16385, 17409]),
+    LEFT: new Set([4097, 36865, 20481, 5121, 37889, 21505]),
+    RIGHT: new Set([8193, 40961, 24577, 9217, 41985, 25601]),
+
+    // Corner = LEFT ∪ RIGHT (all have both a horizontal and vertical component)
+    CORNER_LEFT: new Set([36865, 20481, 37889, 21505]),
+    CORNER_RIGHT: new Set([40961, 24577, 41985, 25601]),
+    CORNER_TOP: new Set([36865, 40961, 37889, 41985]),
+    CORNER_BOTTOM: new Set([20481, 24577, 21505, 25601]),
+};
+
+// Derived composite sets (computed once, not rebuilt on every call)
+GrabOps.CORNER = new Set([...GrabOps.CORNER_LEFT, ...GrabOps.CORNER_RIGHT]);
+GrabOps.RESIZE = new Set([
+    ...GrabOps.TOP, ...GrabOps.BOTTOM,
+    ...GrabOps.LEFT, ...GrabOps.RIGHT,
+]);
+
 export class TileManager {
     constructor(tracker, settings) {
         this._tracker = tracker;
@@ -176,13 +203,83 @@ export class TileManager {
         }
     }
 
-    _gapSize(){
+    // ─── Shared Helpers ──────────────────────────────────────────────────────────
+
+    _gapSize() {
         return this._settings.get_int('gap-size');
     }
 
-    _startInsertDragTracking(window, wsIndex) {
+    /**
+     * Build the inner work-area rect (inset by gap on all sides) for a workspace.
+     */
+    _innerRect(wsIndex) {
+        return LayoutEngine.innerRect(wsIndex, this._gapSize());
+    }
+
+    /**
+     * Calculate and return the full layout array for a workspace.
+     */
+    _calculateLayout(wsIndex) {
+        const root = this._tracker.getRootForWorkspace(wsIndex);
+        const innerRect = this._innerRect(wsIndex);
+        return LayoutEngine.calculate(root, innerRect, this._gapSize());
+    }
+
+    /**
+     * Apply a fully-calculated layout array to all windows,
+     * skipping the actively-grabbed focused window if a grab is in progress.
+     */
+    _applyLayoutArray(layout) {
+        layout.forEach(({ window, x, y, width, height }) => {
+            if (this._grabActive && window === global.display.focus_window) return;
+            this._moveWindow(window, x, y, width, height);
+        });
+    }
+
+    /**
+     * Animate a fully-calculated layout array to all windows except one
+     * (typically the window currently being dragged), then snap that one directly.
+     */
+    _applyLayoutWithSnap(layout, snapWindow) {
+        layout.forEach(({ window: w, x, y, width, height }) => {
+            if (w === snapWindow) return;
+            this._animateWindow(w, x, y, width, height);
+        });
+
+        const snapTarget = layout.find(l => l.window === snapWindow);
+        if (snapTarget) {
+            this._moveWindow(snapWindow, snapTarget.x, snapTarget.y, snapTarget.width, snapTarget.height);
+        }
+    }
+
+    /**
+     * Create and show a highlight widget over a rect on the window_group.
+     * Destroys any existing highlight first.
+     */
+    _showHighlight(x, y, width, height, style) {
+        this._removeHighlight();
+
+        this._highlightWidget = new St.Widget({
+            style,
+            reactive: false,
+            x, y, width, height,
+        });
+
+        global.window_group.add_child(this._highlightWidget);
+        global.window_group.set_child_above_sibling(this._highlightWidget, null);
+    }
+
+    /**
+     * Start a 50 ms polling loop that tracks the mouse over tiled windows
+     * and calls `onHit(targetWindow, extra)` / `onMiss()` when hover state changes.
+     *
+     * @param {Meta.Window} dragWindow  – the window being dragged (excluded from hit-test)
+     * @param {number}      wsIndex     – workspace to inspect
+     * @param {Function}    hitFn       – (targetWindow, mouseX, mouseY) → any; return value stored as dragTarget
+     * @param {Function}    changeFn    – (newTarget, extra) called when target/extra change
+     */
+    _startDragPoll(dragWindow, wsIndex, hitFn, changeFn) {
         this._dragTarget = null;
-        this._dragPosition = null;
 
         this._dragPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
             if (!this._dragWindow) return GLib.SOURCE_REMOVE;
@@ -191,7 +288,7 @@ export class TileManager {
             const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
 
             let newTarget = null;
-            let newPosition = null;
+            let extra = null;
 
             for (const w of tiledWindows) {
                 if (w === this._dragWindow) continue;
@@ -199,22 +296,23 @@ export class TileManager {
                 if (mouseX >= frame.x && mouseX <= frame.x + frame.width &&
                     mouseY >= frame.y && mouseY <= frame.y + frame.height) {
                     newTarget = w;
-                    newPosition = this._getDropPosition(w, mouseX, mouseY);
+                    extra = hitFn(w, mouseX, mouseY);
                     break;
                 }
             }
 
-            if (newTarget !== this._dragTarget || newPosition !== this._dragPosition) {
+            if (newTarget !== this._dragTarget || extra !== this._dragPosition) {
                 this._dragTarget = newTarget;
-                this._dragPosition = newPosition;
-                this._updateInsertHighlight(newTarget, newPosition);
+                this._dragPosition = extra;
+                changeFn(newTarget, extra);
             }
 
             return GLib.SOURCE_CONTINUE;
         });
     }
 
-    _stopInsertDragTracking() {
+    // Stop the drag-poll timer and clear all drag state.
+    _stopDragPoll() {
         if (this._dragPollId) {
             GLib.source_remove(this._dragPollId);
             this._dragPollId = null;
@@ -223,6 +321,20 @@ export class TileManager {
         this._dragWindow = null;
         this._dragTarget = null;
         this._dragPosition = null;
+    }
+
+    // ─── Insert Drag ─────────────────────────────────────────────────────────────
+
+    _startInsertDragTracking(window, wsIndex) {
+        this._startDragPoll(
+            window, wsIndex,
+            (targetWindow, mouseX, mouseY) => this._getDropPosition(targetWindow, mouseX, mouseY),
+            (newTarget, newPosition) => this._updateInsertHighlight(newTarget, newPosition)
+        );
+    }
+
+    _stopInsertDragTracking() {
+        this._stopDragPoll();
     }
 
     _getDropPosition(targetWindow, mouseX, mouseY) {
@@ -237,11 +349,8 @@ export class TileManager {
         const topZone = h * 0.3;
         const bottomZone = h * 0.7;
 
-        // Check horizontal zones first
         if (relX < leftZone) return 'before';
         if (relX > rightZone) return 'after';
-
-        // Then vertical zones
         if (relY < topZone) return 'above';
         if (relY > bottomZone) return 'below';
 
@@ -249,49 +358,27 @@ export class TileManager {
         return null;
     }
 
+    // ─── Swap Drag ───────────────────────────────────────────────────────────────
+
     _startSwapDragTracking(window, wsIndex) {
-        this._dragTarget = null;
-
-        // Poll mouse position every 50ms during drag
-        this._dragPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-            if (!this._dragWindow) return GLib.SOURCE_REMOVE;
-
-            const [mouseX, mouseY] = global.get_pointer();
-            const tiledWindows = this._tracker.getWindowsForWorkspace(wsIndex);
-
-            let newTarget = null;
-            for (const w of tiledWindows) {
-                if (w === this._dragWindow) continue;
-                const frame = w.get_frame_rect();
-                if (mouseX >= frame.x && mouseX <= frame.x + frame.width &&
-                    mouseY >= frame.y && mouseY <= frame.y + frame.height) {
-                    newTarget = w;
-                    break;
-                }
-            }
-
-            if (newTarget !== this._dragTarget) {
-                this._dragTarget = newTarget;
-                this._updateSwapHighlight(newTarget);
-            }
-
-            return GLib.SOURCE_CONTINUE;
-        });
+        this._startDragPoll(
+            window, wsIndex,
+            (_targetWindow, _mouseX, _mouseY) => null,   // no extra data needed for swap
+            (newTarget, _extra) => this._updateSwapHighlight(newTarget)
+        );
     }
 
     _stopSwapDragTracking() {
-        if (this._dragPollId) {
-            GLib.source_remove(this._dragPollId);
-            this._dragPollId = null;
-        }
-        this._removeHighlight();
-        this._dragWindow = null;
-        this._dragTarget = null;
+        this._stopDragPoll();
     }
 
+    // ─── Highlight Rendering ─────────────────────────────────────────────────────
+
     _updateInsertHighlight(window, position) {
-        this._removeHighlight();
-        if (!window || !position) return;
+        if (!window || !position) {
+            this._removeHighlight();
+            return;
+        }
 
         const frame = window.get_frame_rect();
         if (!frame || frame.width === 0) return;
@@ -325,34 +412,25 @@ export class TileManager {
                 break;
         }
 
-        this._highlightWidget = new St.Widget({
-            style: 'background-color: rgba(100, 150, 255, 0.35); border: 2px solid rgba(100, 150, 255, 0.9); border-radius: 8px;',
-            reactive: false,
+        this._showHighlight(
             x, y, width, height,
-        });
-
-        global.window_group.add_child(this._highlightWidget);
-        global.window_group.set_child_above_sibling(this._highlightWidget, null);
+            'background-color: rgba(100, 150, 255, 0.35); border: 2px solid rgba(100, 150, 255, 0.9); border-radius: 8px;'
+        );
     }
 
     _updateSwapHighlight(window) {
-        this._removeHighlight();
-        if (!window) return;
+        if (!window) {
+            this._removeHighlight();
+            return;
+        }
 
         const frame = window.get_frame_rect();
         if (!frame || frame.width === 0) return;
 
-        this._highlightWidget = new St.Widget({
-            style: 'background-color: rgba(100, 150, 255, 0.25); border: 2px solid rgba(100, 150, 255, 0.8); border-radius: 12px;',
-            reactive: false,
-            x: frame.x,
-            y: frame.y,
-            width: frame.width,
-            height: frame.height,
-        });
-
-        global.window_group.add_child(this._highlightWidget);
-        global.window_group.set_child_above_sibling(this._highlightWidget, null);
+        this._showHighlight(
+            frame.x, frame.y, frame.width, frame.height,
+            'background-color: rgba(100, 150, 255, 0.25); border: 2px solid rgba(100, 150, 255, 0.8); border-radius: 12px;'
+        );
     }
 
     _removeHighlight() {
@@ -361,6 +439,8 @@ export class TileManager {
             this._highlightWidget = null;
         }
     }
+
+    // ─── Drag End Handlers ───────────────────────────────────────────────────────
 
     _onInsertDragEnd(window, dragWindow, dragTarget, dragPosition) {
         if (!dragTarget || !dragWindow || !dragPosition) {
@@ -371,22 +451,8 @@ export class TileManager {
         const wsIndex = window.get_workspace().index();
         this._tracker._tree.insertWindowRelativeTo(dragWindow, dragTarget, dragPosition, wsIndex);
 
-        const root = this._tracker.getRootForWorkspace(wsIndex);
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const innerRect = {
-            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
-            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
-        };
-        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
-        layout.forEach(({ window: w, x, y, width, height }) => {
-            if (w === dragWindow) return;
-            this._animateWindow(w, x, y, width, height);
-        });
-
-        const dragTarget2 = layout.find(l => l.window === dragWindow);
-        if (dragTarget2) {
-            this._moveWindow(dragWindow, dragTarget2.x, dragTarget2.y, dragTarget2.width, dragTarget2.height);
-        }
+        const layout = this._calculateLayout(wsIndex);
+        this._applyLayoutWithSnap(layout, dragWindow);
     }
 
     _onSwapDragEnd(window, dragWindow, dragTarget) {
@@ -398,30 +464,15 @@ export class TileManager {
         const wsIndex = window.get_workspace().index();
         this._tracker._tree.swapWindows(dragWindow, dragTarget, wsIndex);
 
-        // Animate both windows to their new positions
-        const root = this._tracker.getRootForWorkspace(wsIndex);
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const innerRect = {
-            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
-            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
-        };
-        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
-        layout.forEach(({ window: w, x, y, width, height }) => {
-            if (w === dragWindow) return; // dragged window already at drop position
-            this._animateWindow(w, x, y, width, height);
-        });
-
-        // Move dragged window directly without animation
-        const dragTarget2 = layout.find(l => l.window === dragWindow);
-        if (dragTarget2) {
-            this._moveWindow(dragWindow, dragTarget2.x, dragTarget2.y, dragTarget2.width, dragTarget2.height);
-        }
+        const layout = this._calculateLayout(wsIndex);
+        this._applyLayoutWithSnap(layout, dragWindow);
     }
 
     setDragMode(mode) {
         this._dragMode = mode;
-        console.log(`[Tiler] drag mode: ${mode}`);
     }
+
+    // ─── Live Resize ─────────────────────────────────────────────────────────────
 
     _startCornerResize(window, grabOp, root, innerRect, wsIndex) {
         const hSide = this._cornerHorizontalSide(grabOp);
@@ -457,7 +508,6 @@ export class TileManager {
             id: window.connect('size-changed', () => {
                 const frame = window.get_frame_rect();
 
-                // Apply both horizontal and vertical temp ratios simultaneously
                 if (hSnapshot && hAvailable > 0) {
                     const newHRatio = frame.width / hAvailable;
                     this._applySnapshotResize(hSnapshot, newHRatio, hSide);
@@ -468,22 +518,18 @@ export class TileManager {
                     this._applySnapshotResize(vSnapshot, newVRatio, vSide);
                 }
 
-                // Save temp ratios for commit
                 this._lastTempRatios = [
                     ...(hSnapshot?.map(e => ({ nodeId: e.node.id, ratio: e.node.ratio })) ?? []),
                     ...(vSnapshot?.map(e => ({ nodeId: e.node.id, ratio: e.node.ratio })) ?? []),
                 ];
 
-                // Single full layout recalculation with both axes applied
                 const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
 
-                // Move all windows except the dragged one
                 layout.forEach(({ window: w, x, y, width, height }) => {
                     if (w === window) return;
                     this._moveWindow(w, x, y, width, height);
                 });
 
-                // Restore both snapshots
                 hSnapshot?.forEach(e => e.node.ratio = e.ratio);
                 vSnapshot?.forEach(e => e.node.ratio = e.ratio);
             })
@@ -509,19 +555,7 @@ export class TileManager {
     }
 
     _findParentWithDirection(node, root, direction) {
-        const parent = this._tracker._tree.findParent(node.id, root);
-        if (!parent) return null;
-        if (parent.direction === direction) return parent;
-        return this._findParentWithDirection(parent, root, direction);
-    }
-
-    _isAncestorOf(node, leaf) {
-        if (node.type === 'leaf') return false;
-        for (const child of node.children) {
-            if (child === leaf) return true;
-            if (this._isAncestorOf(child, leaf)) return true;
-        }
-        return false;
+        return LayoutEngine.findParentWithDirection(node, root, direction, this._tracker._tree);
     }
 
     _startLiveResize(window, grabOp) {
@@ -537,13 +571,7 @@ export class TileManager {
                 : this._isBottomResize(grabOp) ? 'bottom'
                     : 'top';
 
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const gap = this._gapSize();
-        const innerRect = {
-            x: workArea.x + gap, y: workArea.y + gap,
-            width: workArea.width - gap * 2, height: workArea.height - gap * 2,
-        };
-
+        const innerRect = this._innerRect(wsIndex);
         const root = this._tracker.getRootForWorkspace(wsIndex);
 
         if (this._isCornerResize(grabOp)) {
@@ -552,22 +580,15 @@ export class TileManager {
         }
 
         const leaf = this._tracker._tree.findLeaf(window, root);
-        console.log(`[Tiler] startLiveResize: "${window.get_title()}" grabOp=${grabOp} isVertical=${isVertical} side=${side}`);
-        console.log(`[Tiler] leaf found=${!!leaf}`);
 
         const expectedDirection = isVertical ? 'vertical' : 'horizontal';
         const parent = this._findParentWithDirection(leaf, root, expectedDirection);
-        console.log(`[Tiler] parent found=${!!parent} direction=${parent?.direction}`);
 
         const targetChild = parent ? this._findDirectChildContaining(parent, leaf) : null;
-        console.log(`[Tiler] targetChild=${targetChild?.type} id=${targetChild?.id}`);
-
-        console.log(`[Tiler] liveResize: "${window.get_title()}" side=${side} parent=${parent?.direction} targetChild=${targetChild?.type} siblings=${parent?.children.filter(c => c.ratio > 0).length}`);
 
         const siblingsSnapshot = parent?.children
             .filter(c => c.ratio > 0)
             .map(c => ({ node: c, ratio: c.ratio, isTarget: c === targetChild }));
-        console.log(`[Tiler] siblings=${siblingsSnapshot?.length} target in siblings=${siblingsSnapshot?.some(s => s.isTarget)}`);
 
         const parentLayout = this._getContainerRect(parent, root, innerRect);
         if (!parentLayout) return;
@@ -610,7 +631,6 @@ export class TileManager {
                     ratio: e.node.ratio,
                 }));
 
-                // Only recalculate and move windows inside the resizing container
                 const containerLayout = LayoutEngine.calculate(parent,
                     this._getContainerRect(parent, root, innerRect), this._gapSize());
 
@@ -625,41 +645,11 @@ export class TileManager {
     }
 
     _findDirectChildContaining(parent, leaf) {
-        for (const child of parent.children) {
-            if (child === leaf) return child;
-            if (child.type === 'container') {
-                // Check if leaf is inside this container
-                if (this._tracker._tree.findNodeById(leaf.id, child)) return child;
-            }
-        }
-        return null;
+        return LayoutEngine.findDirectChildContaining(parent, leaf, this._tracker._tree);
     }
 
     _getContainerRect(container, root, innerRect) {
-        // Calculate layout and find bounds of this container's children
-        const gap = this._gapSize();
-        const layout = LayoutEngine.calculate(root, innerRect, gap);
-        const children = [];
-        this._collectLayoutForContainer(container, layout, children);
-        if (children.length === 0) return null;
-
-        const minX = Math.min(...children.map(l => l.x));
-        const maxX = Math.max(...children.map(l => l.x + l.width));
-        const minY = Math.min(...children.map(l => l.y));
-        const maxY = Math.max(...children.map(l => l.y + l.height));
-
-        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-    }
-
-    _collectLayoutForContainer(container, layout, results) {
-        if (container.type === 'leaf') {
-            const found = layout.find(l => l.window === container.window);
-            if (found) results.push(found);
-            return;
-        }
-        for (const child of container.children) {
-            this._collectLayoutForContainer(child, layout, results);
-        }
+        return LayoutEngine.getContainerRect(container, root, innerRect, this._gapSize());
     }
 
     _stopLiveResize() {
@@ -669,6 +659,8 @@ export class TileManager {
             this._liveResizeSignal = null;
         }
     }
+
+    // ─── Layout Scheduling ───────────────────────────────────────────────────────
 
     _scheduleLayout(wsIndex) {
         if (this._isResizing) return;
@@ -685,6 +677,8 @@ export class TileManager {
 
         this._layoutTimers.set(wsIndex, id);
     }
+
+    // ─── Focus Handling ──────────────────────────────────────────────────────────
 
     _onFocusChanged() {
         if (this._focusSizeSignal) {
@@ -714,13 +708,7 @@ export class TileManager {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
                 if (this._applyingLayout) return GLib.SOURCE_REMOVE;
 
-                const root = this._tracker.getRootForWorkspace(wsIndex);
-                const workArea = LayoutEngine.getWorkArea(wsIndex);
-                const innerRect = {
-                    x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
-                    width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
-                };
-                const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
+                const layout = this._calculateLayout(wsIndex);
                 const target = layout.find(l => l.window === focused);
                 if (!target) return GLib.SOURCE_REMOVE;
 
@@ -744,6 +732,8 @@ export class TileManager {
         });
     }
 
+    // ─── Layout Application ──────────────────────────────────────────────────────
+
     _applyLayout(wsIndex) {
         this._applyingLayout = true;
 
@@ -752,20 +742,8 @@ export class TileManager {
             this._applyingLayoutTimer = null;
         }
 
-        const root = this._tracker.getRootForWorkspace(wsIndex);
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const gap = this._gapSize();
-        const innerRect = {
-            x: workArea.x + gap,
-            y: workArea.y + gap,
-            width: workArea.width - gap * 2,
-            height: workArea.height - gap * 2,
-        };
-        const layout = LayoutEngine.calculate(root, innerRect, gap);
-        layout.forEach(({ window, x, y, width, height }) => {
-            if (this._grabActive && window === global.display.focus_window) return;
-            this._moveWindow(window, x, y, width, height);
-        });
+        const layout = this._calculateLayout(wsIndex);
+        this._applyLayoutArray(layout);
 
         this._applyingLayoutTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
             this._applyingLayout = false;
@@ -786,18 +764,17 @@ export class TileManager {
         windows.forEach(w => w.lower());
     }
 
+    // ─── Window Movement ─────────────────────────────────────────────────────────
+
     _moveWindow(window, x, y, width, height) {
         const actor = window.get_compositor_private();
         if (!actor) {
-            console.log(`[Tiler] _moveWindow: no actor for "${window.get_title()}"`);
             return;
         }
         if (this._grabActive && window === global.display.focus_window) {
-            console.log(`[Tiler] _moveWindow: skipping "${window.get_title()}" — grab active`);
             return;
         }
         const frame = window.get_frame_rect();
-        console.log(`[Tiler] _moveWindow: "${window.get_title()}" to ${x},${y} ${width}x${height} frame=${frame.x},${frame.y} ${frame.width}x${frame.height}`);
         if (frame.width === 0 || frame.height === 0) {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
                 window.move_resize_frame(false, x, y, width, height);
@@ -838,70 +815,54 @@ export class TileManager {
         if (!this._isMovingGrab(grabOp)) return;
 
         const wsIndex = window.get_workspace().index();
-        const root = this._tracker.getRootForWorkspace(wsIndex);
         const windows = this._tracker.getWindowsForWorkspace(wsIndex);
         if (!windows.some(w => w === window)) return;
 
-        const workArea = LayoutEngine.getWorkArea(wsIndex);
-        const innerRect = {
-            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
-            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
-        };
-
-        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
+        const layout = this._calculateLayout(wsIndex);
         const target = layout.find(l => l.window === window);
         if (!target) return;
 
         this._animateWindow(window, target.x, target.y, target.width, target.height);
     }
 
+    // ─── Grab Op Classification ──────────────────────────────────────────────────
+
     _isMovingGrab(grabOp) {
         return grabOp === Meta.GrabOp.MOVING ||
             grabOp === Meta.GrabOp.KEYBOARD_MOVING ||
-            grabOp === 1025;
+            grabOp === GrabOps.KEYBOARD_MOVING;
     }
 
     _isResizingGrab(grabOp) {
-        return [
-            4097, 8193, 36865, 20481, 40961, 24577,  // mouse horizontal resize
-            5121, 9217, 37889, 21505, 41985, 25601,  // Super+mouse horizontal resize
-            32769, 16385,                              // mouse vertical resize (top, bottom)
-            33793, 17409                               // Super+mouse vertical resize (top, bottom)
-        ].includes(grabOp);
+        return GrabOps.RESIZE.has(grabOp);
     }
 
     _isTopResize(grabOp) {
-        return [32769, 33793].includes(grabOp);
+        return GrabOps.TOP.has(grabOp);
     }
 
     _isBottomResize(grabOp) {
-        return [16385, 17409].includes(grabOp);
+        return GrabOps.BOTTOM.has(grabOp);
     }
 
     _isLeftResize(grabOp) {
-        return [4097, 36865, 20481, 5121, 37889, 21505].includes(grabOp);
+        return GrabOps.LEFT.has(grabOp);
     }
 
     _isRightResize(grabOp) {
-        return [8193, 40961, 24577, 9217, 41985, 25601].includes(grabOp);
+        return GrabOps.RIGHT.has(grabOp);
     }
 
     _isCornerResize(grabOp) {
-        return [36865, 20481, 40961, 24577, 37889, 21505, 41985, 25601].includes(grabOp);
+        return GrabOps.CORNER.has(grabOp);
     }
 
     _cornerHorizontalSide(grabOp) {
-        // left corners
-        if ([36865, 20481, 37889, 21505].includes(grabOp)) return 'left';
-        // right corners
-        return 'right';
+        return GrabOps.CORNER_LEFT.has(grabOp) ? 'left' : 'right';
     }
 
     _cornerVerticalSide(grabOp) {
-        // top corners
-        if ([36865, 40961, 37889, 41985].includes(grabOp)) return 'top';
-        // bottom corners
-        return 'bottom';
+        return GrabOps.CORNER_TOP.has(grabOp) ? 'top' : 'bottom';
     }
 
     _onResizeEnd(window, grabOp) {
