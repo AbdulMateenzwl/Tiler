@@ -6,8 +6,9 @@ import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
 export class TileManager {
-    constructor(tracker) {
+    constructor(tracker, settings) {
         this._tracker = tracker;
+        this._settings = settings;
         this._signals = [];
         this._displaySignals = [];
         this._layoutTimers = new Map();
@@ -173,6 +174,10 @@ export class TileManager {
             GLib.source_remove(this._focusCleanupTimer);
             this._focusCleanupTimer = null;
         }
+    }
+
+    _gapSize(){
+        return this._settings.get_int('gap-size');
     }
 
     _startInsertDragTracking(window, wsIndex) {
@@ -369,10 +374,10 @@ export class TileManager {
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
+            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
+            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
         };
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
         layout.forEach(({ window: w, x, y, width, height }) => {
             if (w === dragWindow) return;
             this._animateWindow(w, x, y, width, height);
@@ -397,10 +402,10 @@ export class TileManager {
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
+            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
+            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
         };
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
         layout.forEach(({ window: w, x, y, width, height }) => {
             if (w === dragWindow) return; // dragged window already at drop position
             this._animateWindow(w, x, y, width, height);
@@ -444,8 +449,8 @@ export class TileManager {
         const hParentLayout = hParent ? this._getContainerRect(hParent, root, innerRect) : null;
         const vParentLayout = vParent ? this._getContainerRect(vParent, root, innerRect) : null;
 
-        const hAvailable = hParentLayout ? hParentLayout.width - 8 * ((hSnapshot?.length ?? 1) - 1) : 0;
-        const vAvailable = vParentLayout ? vParentLayout.height - 8 * ((vSnapshot?.length ?? 1) - 1) : 0;
+        const hAvailable = hParentLayout ? hParentLayout.width - this._gapSize() * ((hSnapshot?.length ?? 1) - 1) : 0;
+        const vAvailable = vParentLayout ? vParentLayout.height - this._gapSize() * ((vSnapshot?.length ?? 1) - 1) : 0;
 
         this._liveResizeSignal = {
             window,
@@ -470,7 +475,7 @@ export class TileManager {
                 ];
 
                 // Single full layout recalculation with both axes applied
-                const layout = LayoutEngine.calculate(root, innerRect, 8);
+                const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
 
                 // Move all windows except the dragged one
                 layout.forEach(({ window: w, x, y, width, height }) => {
@@ -533,9 +538,10 @@ export class TileManager {
                     : 'top';
 
         const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const gap = this._gapSize();
         const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
+            x: workArea.x + gap, y: workArea.y + gap,
+            width: workArea.width - gap * 2, height: workArea.height - gap * 2,
         };
 
         const root = this._tracker.getRootForWorkspace(wsIndex);
@@ -566,7 +572,7 @@ export class TileManager {
         const parentLayout = this._getContainerRect(parent, root, innerRect);
         if (!parentLayout) return;
 
-        const totalGaps = 8 * (siblingsSnapshot.length - 1);
+        const totalGaps = this._gapSize() * (siblingsSnapshot.length - 1);
         const availableSize = isVertical
             ? parentLayout.height - totalGaps
             : parentLayout.width - totalGaps;
@@ -606,7 +612,7 @@ export class TileManager {
 
                 // Only recalculate and move windows inside the resizing container
                 const containerLayout = LayoutEngine.calculate(parent,
-                    this._getContainerRect(parent, root, innerRect), 8);
+                    this._getContainerRect(parent, root, innerRect), this._gapSize());
 
                 containerLayout.forEach(({ window: w, x, y, width, height }) => {
                     if (w === window) return;
@@ -631,7 +637,8 @@ export class TileManager {
 
     _getContainerRect(container, root, innerRect) {
         // Calculate layout and find bounds of this container's children
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const gap = this._gapSize();
+        const layout = LayoutEngine.calculate(root, innerRect, gap);
         const children = [];
         this._collectLayoutForContainer(container, layout, children);
         if (children.length === 0) return null;
@@ -710,10 +717,10 @@ export class TileManager {
                 const root = this._tracker.getRootForWorkspace(wsIndex);
                 const workArea = LayoutEngine.getWorkArea(wsIndex);
                 const innerRect = {
-                    x: workArea.x + 8, y: workArea.y + 8,
-                    width: workArea.width - 16, height: workArea.height - 16,
+                    x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
+                    width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
                 };
-                const layout = LayoutEngine.calculate(root, innerRect, 8);
+                const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
                 const target = layout.find(l => l.window === focused);
                 if (!target) return GLib.SOURCE_REMOVE;
 
@@ -747,13 +754,14 @@ export class TileManager {
 
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
+        const gap = this._gapSize();
         const innerRect = {
-            x: workArea.x + 8,
-            y: workArea.y + 8,
-            width: workArea.width - 16,
-            height: workArea.height - 16,
+            x: workArea.x + gap,
+            y: workArea.y + gap,
+            width: workArea.width - gap * 2,
+            height: workArea.height - gap * 2,
         };
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, gap);
         layout.forEach(({ window, x, y, width, height }) => {
             if (this._grabActive && window === global.display.focus_window) return;
             this._moveWindow(window, x, y, width, height);
@@ -836,11 +844,11 @@ export class TileManager {
 
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
+            x: workArea.x + this._gapSize(), y: workArea.y + this._gapSize(),
+            width: workArea.width - this._gapSize() * 2, height: workArea.height - this._gapSize() * 2,
         };
 
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, this._gapSize());
         const target = layout.find(l => l.window === window);
         if (!target) return;
 

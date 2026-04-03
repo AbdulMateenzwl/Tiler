@@ -9,19 +9,19 @@ export default class TilerExtension extends Extension {
     enable() {
         const settings = this.getSettings('org.gnome.shell.extensions.tiler');
 
-        this._tracker = new WindowTracker();
+        this._tracker = new WindowTracker(settings);
         this._tracker.enable();
 
-        this._tileManager = new TileManager(this._tracker);
+        this._tileManager = new TileManager(this._tracker, settings);
         this._tileManager.enable();
 
-        this._resizeManager = new ResizeManager(this._tracker);
+        this._resizeManager = new ResizeManager(this._tracker, settings);
         this._resizeManager.enable();
 
         this._keybindings = new Keybindings(this._tileManager, this._tracker, settings, this._resizeManager);
         this._keybindings.enable();
 
-        this._borderManager = new BorderManager();
+        this._borderManager = new BorderManager(settings);
         this._borderManager.enable();
 
         this._tracker.connect('window-added', (_, window) => {

@@ -101,11 +101,11 @@ export class Keybindings {
                         .get_work_area_for_monitor(global.display.get_primary_monitor());
 
                     const innerRect = {
-                        x: workArea.x + 8, y: workArea.y + 8,
-                        width: workArea.width - 16, height: workArea.height - 16,
+                        x: workArea.x + this._gap, y: workArea.y + this._gap,
+                        width: workArea.width - this._gap * 2, height: workArea.height - this._gap * 2,
                     };
 
-                    const layout = LayoutEngine.calculate(root, innerRect, 8);
+                    const layout = LayoutEngine.calculate(root, innerRect, this._gap);
                     const target = this._tracker._tree.findWindowInDirection(focused, direction, layout);
                     if (target) target.focus(global.get_current_time());
                 }
@@ -140,6 +140,10 @@ export class Keybindings {
                 }
             );
         });
+    }
+
+    get _gap(){
+        return this._settings.get_int('gap-size');
     }
 
     _retileAll(wsIndex) {

@@ -9,17 +9,30 @@ const RESIZE_STEP_H = 50; // horizontal
 const RESIZE_STEP_V = 50; // vertical
 
 export class ResizeManager {
-    constructor(tracker) {
+    constructor(tracker, settings) {
         this._tracker = tracker;
         this._resizeMode = false;
         this._resizeWindow = null;
         this._indicator = null;
+        this._settings = settings;
     }
 
     enable() { }
 
     disable() {
         this._exitResizeMode();
+    }
+
+    get _stepH() {
+        return this._settings.get_int('resize-step-h');
+    }
+
+    get _stepV() {
+        return this._settings.get_int('resize-step-v');
+    }
+
+    get _gap(){
+        return this._settings.get_int('gap-size');
     }
 
     isInResizeMode() {
@@ -113,8 +126,8 @@ export class ResizeManager {
         const root = this._tracker.getRootForWorkspace(wsIndex);
         const workArea = LayoutEngine.getWorkArea(wsIndex);
         const innerRect = {
-            x: workArea.x + 8, y: workArea.y + 8,
-            width: workArea.width - 16, height: workArea.height - 16,
+            x: workArea.x + this._gap, y: workArea.y + this._gap,
+            width: workArea.width - this._gap * 2, height: workArea.height - this._gap * 2,
         };
 
         const isHorizontal = direction === 'left' || direction === 'right';
@@ -133,12 +146,12 @@ export class ResizeManager {
         if (!parentRect) return;
 
         const visibleSiblings = parent.children.filter(c => c.ratio > 0);
-        const totalGaps = 8 * (visibleSiblings.length - 1);
+        const totalGaps = this._gap * (visibleSiblings.length - 1);
         const availableSize = isHorizontal
             ? parentRect.width - totalGaps
             : parentRect.height - totalGaps;
 
-        const stepPixels = isHorizontal ? RESIZE_STEP_H : RESIZE_STEP_V;
+        const stepPixels = isHorizontal ? this._stepH : this._stepV;
         const stepRatio = stepPixels / availableSize;
         const minRatio = 0.1;
 
@@ -154,7 +167,7 @@ export class ResizeManager {
             neighbour.ratio -= stepRatio;
         }
 
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, this._gap);
         layout.forEach(({ window: w, x, y, width, height }) => {
             w.move_resize_frame(false, x, y, width, height);
         });
@@ -217,20 +230,23 @@ export class ResizeManager {
         let { x, y, width, height } = frame;
         const sign = shrink ? -1 : 1;
 
+        const stepH = this._stepH;
+        const stepV = this._stepV;
+
         switch (direction) {
             case 'right':
-                width += sign * RESIZE_STEP_H;
+                width += sign * stepH;
                 break;
             case 'left':
-                width += sign * RESIZE_STEP_H;
-                x -= sign * RESIZE_STEP_H; // move left edge
+                width += sign * stepH;
+                x -= sign * stepH; // move left edge
                 break;
             case 'down':
-                height += sign * RESIZE_STEP_V;
+                height += sign * stepV;
                 break;
             case 'up':
-                height += sign * RESIZE_STEP_V;
-                y -= sign * RESIZE_STEP_V; // move top edge
+                height += sign * stepV;
+                y -= sign * stepV; // move top edge
                 break;
         }
 
@@ -258,7 +274,7 @@ export class ResizeManager {
     }
 
     _getContainerRect(container, root, innerRect) {
-        const layout = LayoutEngine.calculate(root, innerRect, 8);
+        const layout = LayoutEngine.calculate(root, innerRect, this._gap);
         const children = [];
         this._collectLayoutForContainer(container, layout, children);
         if (children.length === 0) return null;

@@ -3,16 +3,9 @@ import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 
-const BORDER_WIDTH = 2;
-
-const BORDER_COLORS = {
-    focused: '#6496ff',
-    tiled: 'rgba(235, 235, 235, 0.85)',
-    floating: '#ffb432',
-};
-
 export class BorderManager {
-    constructor() {
+    constructor(settings) {
+        this._settings = settings;
         this._borders = new Map();
         this._displaySignals = [];
     }
@@ -36,6 +29,18 @@ export class BorderManager {
                 this._onWorkspaceChanged();
             })
         );
+
+        const appearanceKeys = [
+            'border-width', 'border-radius',
+            'border-color-focused', 'border-color-tiled', 'border-color-floating'
+        ];
+        appearanceKeys.forEach(key => {
+            this._displaySignals.push(
+                this._settings.connect(`changed::${key}`, () => {
+                    this._refreshAllBorders();
+                })
+            );
+        });
     }
 
     disable() {
@@ -45,6 +50,46 @@ export class BorderManager {
             this._removeBorder(window);
         }
         this._borders.clear();
+    }
+
+    get _borderRadius() {
+        return this._settings.get_int('border-radius');
+    }
+
+    get _borderWidth() {
+        return this._settings.get_int('border-width');
+    }
+
+    get _focusedColor() {
+        return this._settings.get_string('border-color-focused');
+    }
+
+    get _tiledColor() {
+        return this._settings.get_string('border-color-tiled');
+    }
+
+    get _floatingColor() {
+        return this._settings.get_string('border-color-floating');
+    }
+
+    _colorForType(type) {
+        switch (type) {
+            case 'focused': return this._focusedColor;
+            case 'tiled': return this._tiledColor;
+            case 'floating': return this._floatingColor;
+            default: return '#ffffff';
+        }
+    }
+
+    _buildStyle(type) {
+        return `border: ${this._borderWidth}px solid ${this._colorForType(type)}; border-radius: ${this._borderRadius}px;`;
+    }
+
+    _refreshAllBorders() {
+        for (const [window, data] of this._borders) {
+            data.border.set_style(this._buildStyle(data.type));
+            this._sync(window);
+        }
     }
 
     _onWorkspaceChanged() {
@@ -113,13 +158,11 @@ export class BorderManager {
 
     _ensureBorder(window, type) {
         this._removeBorder(window);
-
         const actor = window.get_compositor_private();
         if (!actor) return;
 
         const frame = window.get_frame_rect();
         if (!frame || frame.width === 0 || frame.height === 0) {
-            // Frame not ready yet — retry once more
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 this._ensureBorder(window, type);
                 return GLib.SOURCE_REMOVE;
@@ -127,41 +170,31 @@ export class BorderManager {
             return;
         }
 
+        const bw = this._borderWidth;
+        const color = this._colorForType(type);
+
         const border = new St.Widget({
-            style: `border: ${BORDER_WIDTH}px solid ${BORDER_COLORS[type]}; border-radius: 12px;`,
+            style: `border: ${bw}px solid ${color}; border-radius: ${this._borderRadius}px;`,
             reactive: false,
             can_focus: false,
         });
 
         global.window_group.add_child(border);
-        border.set_position(frame.x - BORDER_WIDTH, frame.y - BORDER_WIDTH);
-        border.set_size(frame.width + BORDER_WIDTH * 2, frame.height + BORDER_WIDTH * 2);
-
-        // Place above window actor immediately
+        border.set_position(frame.x - bw, frame.y - bw);
+        border.set_size(frame.width + bw * 2, frame.height + bw * 2);
         global.window_group.set_child_above_sibling(border, actor);
 
-        const signals = [];
+        const actorSignals = [];
 
-        signals.push(actor.connect('notify::size', () => this._sync(window)));
-        signals.push(actor.connect('notify::position', () => {
-            this._sync(window);
-            // Restack after position change
-            const data = this._borders.get(window);
-            if (data) global.window_group.set_child_above_sibling(data.border, actor);
-        }));
-        signals.push(window.connect('notify::minimized', () => {
+        actorSignals.push(actor.connect('notify::size', () => this._sync(window)));
+        actorSignals.push(actor.connect('notify::position', () => this._sync(window)));
+        actorSignals.push(window.connect('notify::minimized', () => {
             const data = this._borders.get(window);
             if (!data) return;
-            // Hide border immediately when minimize starts
-            if (window.minimized) {
-                data.border.visible = false;
-            } else {
-                data.border.visible = true;
-                this._sync(window);
-            }
+            data.border.visible = !window.minimized;
         }));
 
-        this._borders.set(window, { border, type, signals, actor });
+        this._borders.set(window, { border, type, actorSignals, actor });
     }
 
     _sync(window) {
@@ -169,15 +202,20 @@ export class BorderManager {
         if (!data) return;
         const frame = window.get_frame_rect();
         if (!frame || frame.width === 0) return;
-        data.border.set_position(frame.x - BORDER_WIDTH, frame.y - BORDER_WIDTH);
-        data.border.set_size(frame.width + BORDER_WIDTH * 2, frame.height + BORDER_WIDTH * 2);
+        const bw = this._borderWidth;
+        data.border.set_position(frame.x - bw, frame.y - bw);
+        data.border.set_size(frame.width + bw * 2, frame.height + bw * 2);
     }
 
     _removeBorder(window) {
         const data = this._borders.get(window);
         if (!data) return;
-        data.signals.forEach(id => data.actor.disconnect(id));
-        data.border.destroy();
+
+        data.actorSignals?.forEach(id => {
+            try { data.actor.disconnect(id); } catch { }
+        });
+
+        try { data.border.destroy(); } catch { }
         this._borders.delete(window);
     }
 
@@ -207,10 +245,8 @@ export class BorderManager {
         const currentWs = global.workspace_manager.get_active_workspace_index();
 
         if (focused && !this._borders.has(focused)) {
-            // Only create borders for normal windows
             if (focused.get_window_type() !== Meta.WindowType.NORMAL) return;
             if (focused.is_skip_taskbar()) return;
-
             const frame = focused.get_frame_rect();
             if (frame && frame.width > 0 && focused.get_maximized() === 0) {
                 this._ensureBorder(focused, 'focused');
@@ -233,15 +269,10 @@ export class BorderManager {
 
             if (newType !== data.type) {
                 data.type = newType;
+                const bw = this._borderWidth;
                 data.border.set_style(
-                    `border: ${BORDER_WIDTH}px solid ${BORDER_COLORS[newType]}; border-radius: 12px;`
+                    `border: ${bw}px solid ${this._colorForType(newType)}; border-radius: ${this._borderRadius}px;`
                 );
-            }
-
-            if (actor) {
-                try {
-                    global.window_group.set_child_above_sibling(data.border, actor);
-                } catch { }
             }
         }
     }

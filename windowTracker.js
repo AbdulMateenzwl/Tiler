@@ -4,14 +4,10 @@ import GLib from 'gi://GLib';
 import { EventEmitter } from 'resource:///org/gnome/shell/misc/signals.js';
 import { ContainerTree } from './containerTree.js';
 
-
-const FLOAT_WIDTH = 800;
-const FLOAT_HEIGHT = 600;
-
-
 export class WindowTracker extends EventEmitter {
-    constructor() {
+    constructor(settings) {
         super();
+        this._settings = settings;
         this._tree = new ContainerTree();
         this._maximizedWindows = new Set(); // windows currently maximized
         this._minimizedWindows = new Set(); // windows currently minimized
@@ -84,6 +80,14 @@ export class WindowTracker extends EventEmitter {
             }
             this._unmaximizeStore.clear();
         }
+    }
+
+    _floatWindowWidth(){
+        return this._settings.get_int('float-window-width');
+    }
+
+    _floatWindowHeight(){
+        return this._settings.get_int('float-window-height');
     }
 
     _onWorkspaceRemoved(removedWsIndex) {
@@ -254,11 +258,13 @@ export class WindowTracker extends EventEmitter {
         const monitor = window.get_monitor();
         const workArea = workspace.get_work_area_for_monitor(monitor);
 
-        const x = workArea.x + Math.floor((workArea.width - FLOAT_WIDTH) / 2);
-        const y = workArea.y + Math.floor((workArea.height - FLOAT_HEIGHT) / 2);
+        const floatWindowWidth = this._floatWindowWidth();
+        const floatWindowHeight = this._floatWindowHeight();
 
-        console.log(`[Tiler] _resizeToFloat: "${window.get_title()}" target=${x},${y} ${FLOAT_WIDTH}x${FLOAT_HEIGHT}`);
-        window.move_resize_frame(false, x, y, FLOAT_WIDTH, FLOAT_HEIGHT);
+        const x = workArea.x + Math.floor((workArea.width - floatWindowWidth) / 2);
+        const y = workArea.y + Math.floor((workArea.height - floatWindowHeight) / 2);
+
+        window.move_resize_frame(false, x, y, floatWindowWidth, floatWindowHeight);
     }
 
     _watchFloatingWindow(window, wsIndex) {

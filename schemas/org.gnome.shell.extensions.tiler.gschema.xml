@@ -2,6 +2,53 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
     <schema id="org.gnome.shell.extensions.tiler" path="/org/gnome/shell/extensions/tiler/">
+
+        <!-- Appearance -->
+        <key name="border-width" type="i">
+            <default>2</default>
+            <summary>Border width in pixels</summary>
+        </key>
+        <key name="border-radius" type="i">
+            <default>12</default>
+            <summary>Border radius in pixels</summary>
+        </key>
+        <key name="border-color-focused" type="s">
+            <default>'#6496ff'</default>
+            <summary>Border color for focused window</summary>
+        </key>
+        <key name="border-color-tiled" type="s">
+            <default>'rgba(235, 235, 235, 0.85)'</default>
+            <summary>Border color for tiled window</summary>
+        </key>
+        <key name="border-color-floating" type="s">
+            <default>'#ffb432'</default>
+            <summary>Border color for floating window</summary>
+        </key>
+        <key name="gap-size" type="i">
+            <default>8</default>
+            <summary>Gap between windows in pixels</summary>
+        </key>
+
+        <!-- Behaviour -->
+        <key name="float-window-width" type="i">
+            <default>800</default>
+            <summary>Floating window default width</summary>
+        </key>
+        <key name="float-window-height" type="i">
+            <default>600</default>
+            <summary>Floating window default height</summary>
+        </key>
+        <key name="resize-step-h" type="i">
+            <default>50</default>
+            <summary>Horizontal resize step in pixels</summary>
+        </key>
+        <key name="resize-step-v" type="i">
+            <default>50</default>
+            <summary>Vertical resize step in pixels</summary>
+        </key>
+
+        <!-- Keybindings -->
+
         <key name="retile-windows" type="as">
             <default>['&lt;Super&gt;&lt;Alt&gt;t']</default>
             <summary>Retile all windows</summary>
