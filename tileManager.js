@@ -67,6 +67,7 @@ export class TileManager {
 
         this._signals.push(
             this._tracker.connect('window-added', (_, window, wsIndex) => {
+                this._applyLayoutImmediate(wsIndex);
                 this._scheduleLayout(wsIndex);
             })
         );
@@ -759,6 +760,14 @@ export class TileManager {
             this._applyingLayout = false;
             this._applyingLayoutTimer = null;
             return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _applyLayoutImmediate(wsIndex) {
+        const layout = this._calculateLayout(wsIndex);
+        layout.forEach(({ window, x, y, width, height }) => {
+            if (this._grabActive && window === global.display.focus_window) return;
+            this._moveWindow(window, x, y, width, height);
         });
     }
 
