@@ -225,12 +225,11 @@ export class WindowTracker extends EventEmitter {
             if (!leaf) return;
 
             if (window.get_maximized() !== 0) {
-
                 const id = window.connect('notify::maximized-horizontally', () => {
                     if (window.get_maximized() === 0) {
-                        window.disconnect(id);
+                        try { window.disconnect(id); } catch { }
                         this._tree.restoreNode(window, wsIndex);
-                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
                             this._floatWindow(window, wsIndex);
                             return GLib.SOURCE_REMOVE;
                         });
@@ -239,6 +238,19 @@ export class WindowTracker extends EventEmitter {
 
                 this._maximizedWindows.delete(window);
                 this._disconnectWindowSignals(window);
+
+                // Move off-screen before unmaximizing to suppress GNOME's
+                // built-in unmaximize animation
+                const workArea = global.workspace_manager
+                    .get_workspace_by_index(wsIndex)
+                    .get_work_area_for_monitor(window.get_monitor());
+                window.move_resize_frame(false,
+                    workArea.x + workArea.width + 100,
+                    workArea.y,
+                    this._floatWindowWidth(),
+                    this._floatWindowHeight()
+                );
+
                 window.unmaximize(Meta.MaximizeFlags.BOTH);
                 return;
             }
@@ -256,12 +268,17 @@ export class WindowTracker extends EventEmitter {
         this._collapseFromTiling(window, wsIndex);
         this.emit('window-floating', window, wsIndex);
 
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-            const frame = window.get_frame_rect();
-            this._resizeToFloat(window, wsIndex);
-            const frame2 = window.get_frame_rect();
-            return GLib.SOURCE_REMOVE;
-        });
+        // Calculate float target position
+        const workspace = global.workspace_manager.get_workspace_by_index(wsIndex);
+        const monitor = window.get_monitor();
+        const workArea = workspace.get_work_area_for_monitor(monitor);
+        const floatWidth = this._floatWindowWidth();
+        const floatHeight = this._floatWindowHeight();
+        const x = workArea.x + Math.floor((workArea.width - floatWidth) / 2);
+        const y = workArea.y + Math.floor((workArea.height - floatHeight) / 2);
+
+        // Emit with target position so tileManager can animate
+        this.emit('window-float-animate', window, x, y, floatWidth, floatHeight);
 
         this._watchFloatingWindow(window, wsIndex);
     }

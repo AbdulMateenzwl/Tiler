@@ -743,9 +743,19 @@ export class TileManager {
         }
 
         const layout = this._calculateLayout(wsIndex);
-        this._applyLayoutArray(layout);
 
-        this._applyingLayoutTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+        const useAnimation = !this._isResizing && layout.length > 1;
+
+        layout.forEach(({ window, x, y, width, height }) => {
+            if (this._grabActive && window === global.display.focus_window) return;
+            if (useAnimation) {
+                this._animateWindow(window, x, y, width, height);
+            } else {
+                this._moveWindow(window, x, y, width, height);
+            }
+        });
+
+        this._applyingLayoutTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
             this._applyingLayout = false;
             this._applyingLayoutTimer = null;
             return GLib.SOURCE_REMOVE;
@@ -823,6 +833,33 @@ export class TileManager {
         if (!target) return;
 
         this._animateWindow(window, target.x, target.y, target.width, target.height);
+    }
+
+    animateWindowToFloat(window, x, y, width, height) {
+        // First set actual geometry so Mutter knows the final size
+        window.move_resize_frame(false, x, y, width, height);
+
+        // Then animate the actor from current position to float position
+        const actor = window.get_compositor_private();
+        if (!actor) return;
+
+        const frame = window.get_frame_rect();
+        const buffer = window.get_buffer_rect();
+        const offsetX = frame.x - buffer.x;
+        const offsetY = frame.y - buffer.y;
+
+        const currentX = actor.x;
+        const currentY = actor.y;
+        const targetActorX = x - offsetX;
+        const targetActorY = y - offsetY;
+
+        actor.set_position(currentX, currentY);
+        actor.ease({
+            x: targetActorX,
+            y: targetActorY,
+            duration: 250,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
     }
 
     // ─── Grab Op Classification ──────────────────────────────────────────────────
