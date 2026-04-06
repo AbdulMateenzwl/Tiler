@@ -124,9 +124,12 @@ export class Keybindings {
             }
         );
 
-        // Resize direction bindings — only active when in resize mode
-        const resizeKeys = ['resize-left', 'resize-right', 'resize-up', 'resize-down'];
-        const resizeDirs = ['left', 'right', 'up', 'down'];
+        const resizeKeys = [
+            'resize-left', 'resize-right', 'resize-up', 'resize-down',
+            'resize-left-shrink', 'resize-right-shrink', 'resize-up-shrink', 'resize-down-shrink',
+        ];
+        const resizeDirs = ['left', 'right', 'up', 'down', 'left', 'right', 'up', 'down'];
+        const resizeShrink = [false, false, false, false, true, true, true, true];
 
         resizeKeys.forEach((key, i) => {
             Main.wm.addKeybinding(
@@ -136,13 +139,13 @@ export class Keybindings {
                 Shell.ActionMode.NORMAL,
                 () => {
                     if (!this._resizeManager.isInResizeMode()) return;
-                    this._resizeManager.resizeInDirection(resizeDirs[i]);
+                    this._resizeManager.resizeInDirection(resizeDirs[i], resizeShrink[i]);
                 }
             );
         });
     }
 
-    get _gap(){
+    get _gap() {
         return this._settings.get_int('gap-size');
     }
 
@@ -191,8 +194,10 @@ export class Keybindings {
         });
 
         Main.wm.removeKeybinding('toggle-resize-mode');
-        ['resize-left', 'resize-right', 'resize-up', 'resize-down'].forEach(key => {
-            Main.wm.removeKeybinding(key);
-        });
+        
+        [
+            'resize-left', 'resize-right', 'resize-up', 'resize-down',
+            'resize-left-shrink', 'resize-right-shrink', 'resize-up-shrink', 'resize-down-shrink',
+        ].forEach(key => Main.wm.removeKeybinding(key));
     }
 }

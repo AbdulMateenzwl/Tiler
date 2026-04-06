@@ -93,6 +93,10 @@ export default class TilerPreferences extends ExtensionPreferences {
             ['resize-right', 'Resize Right (grow)'],
             ['resize-up', 'Resize Up (grow)'],
             ['resize-down', 'Resize Down (grow)'],
+            ['resize-left-shrink', 'Resize Left (shrink)'],
+            ['resize-right-shrink', 'Resize Right (shrink)'],
+            ['resize-up-shrink', 'Resize Up (shrink)'],
+            ['resize-down-shrink', 'Resize Down (shrink)'],
         ]);
     }
 

@@ -109,5 +109,21 @@
             <default>['&lt;Super&gt;&lt;Shift&gt;j']</default>
             <summary>Resize window down (grow down)</summary>
         </key>
+        <key name="resize-left-shrink" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;&lt;Alt&gt;l']</default>
+            <summary>Shrink window left</summary>
+        </key>
+        <key name="resize-right-shrink" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;&lt;Alt&gt;h']</default>
+            <summary>Shrink window right</summary>
+        </key>
+        <key name="resize-up-shrink" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;&lt;Alt&gt;j']</default>
+            <summary>Shrink window up</summary>
+        </key>
+        <key name="resize-down-shrink" type="as">
+            <default>['&lt;Super&gt;&lt;Shift&gt;&lt;Alt&gt;k']</default>
+            <summary>Shrink window down</summary>
+        </key>
     </schema>
 </schemalist>
