@@ -237,20 +237,11 @@ export class TileManager {
         });
     }
 
-    /**
-     * Animate a fully-calculated layout array to all windows except one
-     * (typically the window currently being dragged), then snap that one directly.
-     */
     _applyLayoutWithSnap(layout, snapWindow) {
         layout.forEach(({ window: w, x, y, width, height }) => {
-            if (w === snapWindow) return;
+            // Animate all windows including the dragged one
             this._animateWindow(w, x, y, width, height);
         });
-
-        const snapTarget = layout.find(l => l.window === snapWindow);
-        if (snapTarget) {
-            this._moveWindow(snapWindow, snapTarget.x, snapTarget.y, snapTarget.width, snapTarget.height);
-        }
     }
 
     /**
@@ -745,14 +736,15 @@ export class TileManager {
 
         const layout = this._calculateLayout(wsIndex);
 
-        const useAnimation = !this._isResizing && layout.length > 1;
-
-        layout.forEach(({ window, x, y, width, height }) => {
+        layout.forEach(({ window, x, y, width, height }, index) => {
             if (this._grabActive && window === global.display.focus_window) return;
-            if (useAnimation) {
-                this._animateWindow(window, x, y, width, height);
-            } else {
+            if (this._isResizing) {
                 this._moveWindow(window, x, y, width, height);
+            } else {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, index * 20, () => {
+                    this._animateWindow(window, x, y, width, height);
+                    return GLib.SOURCE_REMOVE;
+                });
             }
         });
 
@@ -809,24 +801,29 @@ export class TileManager {
         const actor = window.get_compositor_private();
         if (!actor) return;
 
-        const currentX = actor.x;
-        const currentY = actor.y;
-
         window.move_resize_frame(false, x, y, width, height);
 
         const frame = window.get_frame_rect();
         const buffer = window.get_buffer_rect();
         const offsetX = frame.x - buffer.x;
         const offsetY = frame.y - buffer.y;
+
         const targetActorX = x - offsetX;
         const targetActorY = y - offsetY;
 
+        const currentX = actor.x;
+        const currentY = actor.y;
+
+        // Cancel any ongoing animation before starting new one
+        actor.remove_all_transitions();
+
         actor.set_position(currentX, currentY);
+
         actor.ease({
             x: targetActorX,
             y: targetActorY,
-            duration: 200,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            duration: 250,
+            mode: Clutter.AnimationMode.EASE_OUT_EXPO,
         });
     }
 
@@ -923,7 +920,10 @@ export class TileManager {
             this._lastTempRatios = null;
         }
 
-        this._applyLayout(wsIndex);
+        const layout = this._calculateLayout(wsIndex);
+        layout.forEach(({ window: w, x, y, width, height }) => {
+            this._animateWindow(w, x, y, width, height);
+        });
     }
 
 }

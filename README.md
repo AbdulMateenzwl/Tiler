@@ -1,6 +1,174 @@
-# Tiler - GNOME Shell Tiling Window Manager Extension
+# Tiler — A Tiling Window Manager for GNOME Shell
 
-A native GNOME Shell extension that brings i3/Sway-style tiling window management to GNOME 46+. Built on a recursive BSP container tree - every layout operation is a tree manipulation. No forking of Mutter or gnome-shell required.
+Tiler is a GNOME Shell extension that turns GNOME into a fully automatic tiling window manager, in the spirit of i3, Sway, and Hyprland — but with first-class support for the things those window managers usually handle poorly: minimizing a window and restoring it to its exact original position and size, maximizing, and floating, all integrated cleanly with GNOME's native behaviour.
+
+Windows are arranged automatically into a non-overlapping grid that fills the screen. You never drag a window to position it or drag its edges to resize it. Open a window and it takes its place in the layout. Close one and the rest expand to fill the gap. Everything is driven by the keyboard, with optional mouse support for resizing and rearranging.
+
+Tiler is built from scratch on GNOME Shell 46+ running on Wayland. The core is a recursive binary space partitioning tree — the same model i3 and Sway use — with a ratio-based sizing system layered on top to handle proportional resizing and clean state restoration.
+
+---
+
+## Table of contents
+
+- [Why Tiler exists](#why-tiler-exists)
+- [Core concepts](#core-concepts)
+- [Features](#features)
+  - [Automatic tiling](#automatic-tiling)
+  - [Splitting and nesting](#splitting-and-nesting)
+  - [Minimize and restore](#minimize-and-restore)
+  - [Maximize](#maximize)
+  - [Floating windows](#floating-windows)
+  - [Mouse resizing](#mouse-resizing)
+  - [Drag to rearrange](#drag-to-rearrange)
+  - [Keyboard navigation](#keyboard-navigation)
+  - [Keyboard resize mode](#keyboard-resize-mode)
+  - [Window borders](#window-borders)
+  - [Workspace isolation](#workspace-isolation)
+  - [Animations](#animations)
+- [Settings](#settings)
+- [Default keybindings](#default-keybindings)
+- [Installation](#installation)
+- [Updating](#updating)
+- [Uninstalling](#uninstalling)
+- [Troubleshooting](#troubleshooting)
+- [Architecture](#architecture)
+- [Contributing](#contributing)
+
+---
+
+## Why Tiler exists
+
+Tiling window managers are loved by people who spend their day in front of a screen because they remove the constant manual labour of arranging windows. But most of them treat minimize, maximize, and float as second-class citizens. In many tiling WMs minimize either doesn't exist or breaks the layout when you bring the window back. Maximize often fights with the tiling logic. Floating windows feel bolted on.
+
+Tiler was built to make those operations feel native. When you minimize a window and restore it later, it returns to exactly the same position at exactly the same size — even if you resized its neighbours while it was gone. Maximize hands the window to GNOME and gets it back cleanly. Floating is a first-class state with its own behaviour and visual treatment. All of this sits on top of a tree model robust enough to never accumulate broken or redundant structure.
+
+---
+
+## Core concepts
+
+Everything in Tiler is built on three ideas.
+
+**The tree.** Each workspace has its own tree. Every window is a *leaf* in that tree. Branches are *containers* that arrange their children either horizontally (side by side) or vertically (stacked). Containers can hold other containers, so the tree nests to any depth. This is how complex layouts are expressed — a horizontal row that contains a vertical column that contains another horizontal row, and so on.
+
+**Ratios.** Every node carries a ratio representing its share of its parent's space. Three windows side by side each have a ratio around 0.33. If you resize one to take half the width, its ratio becomes 0.5 and its neighbours shrink to fill the rest. Ratios are normalized on the fly during layout calculation, so they never need to sum to exactly one.
+
+**Collapse and restore.** When a window leaves the tiling layer — because it was minimized, maximized, or floated — it is not removed from the tree. Instead its ratio is set to zero and its real ratio is saved. A ratio of zero means the layout engine skips the window entirely and its siblings expand to fill the space. When the window comes back, the saved ratio is restored and the siblings shrink proportionally to make room. This single mechanism powers minimize, maximize, and float, and it is what makes restoration so reliable.
+
+---
+
+## Features
+
+### Automatic tiling
+
+Open a window and it is placed into the layout automatically. New windows take half the space of the currently focused window, so opening a window splits the focused one rather than squashing the entire layout equally. Close a window and its siblings grow to reclaim the space. The gap between windows is configurable.
+
+### Splitting and nesting
+
+Before opening a window you can decide whether it should appear beside the focused window or stacked with it:
+
+- The horizontal split shortcut makes the next window open side by side with the focused window.
+- The vertical split shortcut makes the next window open above or below it.
+
+If the focused window's container already runs in the chosen direction, the new window joins as a sibling. If not, Tiler creates a new nested container automatically. This is how you build arbitrarily complex layouts using nothing but the keyboard.
+
+### Minimize and restore
+
+Minimizing a window collapses it out of the tiling layer using the ratio-zero mechanism. Its siblings expand to fill the freed space. The window keeps its position in the tree and a saved copy of its ratio.
+
+When you restore it, Tiler writes the saved ratio back and scales the currently visible siblings down proportionally to make room. The important detail is *proportionally to their current sizes* — if you resized any of those siblings while the window was minimized, those changes are respected. The restored window always lands in a valid, natural-looking layout regardless of what happened while it was away.
+
+### Maximize
+
+Maximizing collapses the window out of the tiling layer and hands it to GNOME, which maximizes it natively. The remaining tiled windows reorganize to use the full screen. When you restore the window it drops straight back into its original position with its original ratio.
+
+Windows that launch already maximized — common with some file managers and dialogs — are detected and watched. The moment they are unmaximized they join the tiling layer at the correct position.
+
+### Floating windows
+
+Floating is a first-class state. Toggling float on a tiled window removes it from the tiling layer, centers it on screen at a configurable size, and lets you move and resize it freely without affecting any tiled window. Toggling float off slides it back into its original tiled position with its saved ratio, animated smoothly.
+
+Floating a window that is currently maximized works too — Tiler unmaximizes it first, suppresses GNOME's built-in restore animation, and animates the window cleanly to the center instead of showing a jarring two-step transition.
+
+### Mouse resizing
+
+Although Tiler is keyboard-driven, full mouse resizing is supported. Drag any window edge or corner and the neighbouring windows resize in real time as you drag. Corner drags resize both axes at once, with each axis finding its own boundary in the tree. The final proportions are committed when you release the mouse.
+
+### Drag to rearrange
+
+Drag a tiled window over another tiled window to rearrange the layout. Two modes are available:
+
+- **Insert mode** drops the window into a specific position. A highlight shows where it will land — dropping on the left, right, top, or bottom 30 percent of the target inserts the window before, after, above, or below it, creating a nested container if needed.
+- **Swap mode** exchanges the two windows' positions in the tree, leaving the structure and all ratios unchanged.
+
+A shortcut toggles between the two modes. If you drag a window but don't drop it on another window, it animates back to its tiled position.
+
+### Keyboard navigation
+
+Move focus between tiled windows using vim-style directional keys. The navigation algorithm finds the window that shares the most edge with the current window in the chosen direction, so focus moves predictably even in complex nested layouts.
+
+### Keyboard resize mode
+
+Press the resize-mode shortcut and a red indicator appears around the active window. While in resize mode, directional keys grow the window from any edge, and the same keys with an extra modifier shrink it. Each press moves the edge by a configurable pixel step.
+
+The resize logic walks up the tree to find the correct neighbour to trade space with, so it works correctly even when the neighbour lives in a different container several levels up. Floating windows resize freely in this mode without disturbing anything else. Press the shortcut again to leave resize mode.
+
+### Window borders
+
+Every window gets a colored border indicating its state at a glance:
+
+- The focused window gets a distinct accent border.
+- Unfocused tiled windows get a subtle border.
+- Floating windows get their own color.
+- Maximized windows get no border.
+
+Border width, corner radius, and all colors are configurable, and changes apply live without restarting.
+
+### Workspace isolation
+
+Each workspace owns a completely independent tree. Tiling, minimizing, resizing, and rearranging on one workspace have no effect on any other. Moving a window to another workspace reorganizes both the source and the destination. Dynamic workspaces are fully supported — when GNOME removes an empty workspace, all higher workspace indices shift down automatically so nothing breaks.
+
+### Animations
+
+Layout changes are animated. When windows reorganize — because one was added, removed, restored, or moved — every affected window animates smoothly to its new position simultaneously. New windows are positioned before they first render, so they appear directly in place instead of flashing at the screen center first.
+
+---
+
+## Settings
+
+Tiler ships with a full GNOME preferences panel, organized into three tabs. Open it with:
+
+```bash
+gnome-extensions prefs tiler@abdulmateenzwl
+```
+
+Or click the settings icon next to Tiler in the GNOME Extensions app.
+
+**Appearance** controls border width, border corner radius, the border colors for focused, tiled, and floating windows, and the gap between windows.
+
+**Behaviour** controls the default width and height for floating windows, and the pixel step used for each keypress in keyboard resize mode (horizontal and vertical separately).
+
+**Keybindings** lets you remap every shortcut. Click the edit icon next to a shortcut, press the new key combination, and it saves automatically. Each shortcut also has a button to clear it and a button to reset it to its default.
+
+All settings apply live — there is no need to disable and re-enable the extension after changing them.
+
+---
+
+## Default keybindings
+
+Every shortcut below can be changed in the Keybindings tab.
+
+| Shortcut | Action |
+|---|---|
+| `Super` + `H` / `J` / `K` / `L` | Focus the window to the left / below / above / right |
+| `Super` + `Shift` + `H` | Set the next window to split horizontally |
+| `Super` + `Shift` + `V` | Set the next window to split vertically |
+| `Super` + `F` | Toggle floating for the focused window |
+| `Super` + `Enter` | Enter or leave keyboard resize mode |
+| `Super` + `Shift` + `H` / `J` / `K` / `L` | In resize mode: grow the window from that edge |
+| `Super` + `Shift` + `Alt` + `H` / `J` / `K` / `L` | In resize mode: shrink the window from that edge |
+| `Super` + `Alt` + `T` | Retile all windows on the current workspace |
+| `Super` + `Shift` + `C` | Set drag mode to swap |
+| `Super` + `Shift` + `X` | Set drag mode to insert |
 
 ---
 
@@ -8,21 +176,37 @@ A native GNOME Shell extension that brings i3/Sway-style tiling window managemen
 
 ### Requirements
 
-- GNOME Shell 46, 47, 48, 49 or 50
-- Wayland session (X11 is not supported)
-- `glib-compile-schemas` available (comes with `libglib2.0-dev` on Debian/Ubuntu)
+- GNOME Shell 46, 47, 48, 49, or 50
+- A Wayland session (X11 is not supported)
+- `glib-compile-schemas`, which ships with the `libglib2.0-dev` package on Debian and Ubuntu, and `glib2-devel` on Fedora
+
+You can check your GNOME Shell version with:
+
+```bash
+gnome-shell --version
+```
 
 ### Install from GitHub
 
+Clone the repository directly into the GNOME extensions directory, using the extension's UUID as the folder name:
+
 ```bash
-# Clone into the GNOME extensions directory
-git clone https://github.com/abdulmateenzwl/tiler.git ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl
+git clone https://github.com/abdulmateenzwl/tiler.git \
+  ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl
+```
 
-# Compile the settings schema
-glib-compile-schemas ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl/schemas/
+Compile the settings schema so the preferences and keybindings work:
 
-# Log out and log back in (required on Wayland - module cache must reload)
-# Then enable the extension
+```bash
+glib-compile-schemas \
+  ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl/schemas/
+```
+
+Log out and log back in. This step is required on Wayland — GNOME Shell cannot reload extensions in place, so the new extension only becomes available after a fresh session starts.
+
+Enable the extension:
+
+```bash
 gnome-extensions enable tiler@abdulmateenzwl
 ```
 
@@ -32,192 +216,83 @@ gnome-extensions enable tiler@abdulmateenzwl
 gnome-extensions info tiler@abdulmateenzwl
 ```
 
-You should see `State: ENABLED`. If the state is `ERROR`, check the logs:
+You should see `State: ENABLED`. If you see `State: ERROR`, see the Troubleshooting section.
+
+---
+
+## Updating
+
+Pull the latest changes, recompile the schema in case it changed, and restart your session:
+
+```bash
+cd ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl
+git pull
+
+glib-compile-schemas schemas/
+```
+
+Then log out and back in. Any time you change extension files or recompile the schema on Wayland, you must start a fresh session for the changes to take effect.
+
+---
+
+## Uninstalling
+
+Disable the extension and remove its folder:
+
+```bash
+gnome-extensions disable tiler@abdulmateenzwl
+rm -rf ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl
+```
+
+Log out and back in to fully unload it.
+
+---
+
+## Troubleshooting
+
+**The extension does not appear after installing.** The most common causes are a forgotten session restart or an uncompiled schema. Make sure you logged out and back in after cloning, and that you ran `glib-compile-schemas` against the `schemas/` folder inside the extension directory. Confirm the folder name exactly matches the UUID `tiler@abdulmateenzwl`.
+
+**The extension shows `State: ERROR`.** Watch the logs while reproducing the problem:
 
 ```bash
 journalctl /usr/bin/gnome-shell -f | grep -i tiler
 ```
 
-### Open settings
+The error and stack trace there will point to the cause. A schema that was not recompiled is the most frequent culprit.
 
-```bash
-gnome-extensions prefs tiler@abdulmateenzwl
-```
+**Keybindings do nothing.** This almost always means the schema was not compiled after install or update. Recompile it and restart your session. Also check the Keybindings tab in case a shortcut conflicts with an existing GNOME binding.
 
-Or open the GNOME Extensions app and click the settings icon next to Tiler.
-
-### Reloading after changes
-
-Any time you edit extension files or recompile the schema, you must log out and log back in. On Wayland, GNOME Shell cannot be restarted in-place.
-
----
-
-## Features
-
-### Core tiling engine
-
-Tiler uses a **recursive BSP container tree** as its core data structure. Every open window is a leaf node in this tree. Containers hold children arranged either horizontally (side by side) or vertically (stacked). The tree can nest arbitrarily deep, giving you full control over complex layouts.
-
-When a new window opens, it takes **half the ratio** of the currently focused window - so your existing layout proportions are preserved rather than being redistributed equally. Windows reorganize automatically whenever any window is opened, closed, moved to another workspace, or changes state.
-
-The gap between windows is configurable from preferences and applied consistently across all layouts.
-
-### Splitting and nesting
-
-By default, new windows are added as siblings in the same container as the focused window. You can change where the next window will be placed before opening it:
-
-- `Super+Shift+H` - the next window will open **side by side** (horizontal split) with the focused window
-- `Super+Shift+V` - the next window will open **above or below** (vertical split) the focused window
-
-If the current container already has the same direction as your split, the window is added as a sibling. If it is a different direction, a new nested container is created automatically.
-
-```
-Example - three windows in a root horizontal container:
-root (horizontal)
-├── Terminal (ratio: 0.33)
-├── vertical_container (ratio: 0.33)
-│   ├── Editor (ratio: 0.5)
-│   └── File Manager (ratio: 0.5)
-└── Browser (ratio: 0.33)
-```
-
-### Window state management
-
-Tiler tracks every tiled window and handles all state transitions cleanly:
-
-**Maximize** - when you maximize a tiled window, it is removed from the tiling layer and its space is redistributed proportionally to its siblings. When you restore it, it comes back to exactly the same position with the same ratio, and siblings restore to their previous sizes.
-
-**Minimize** - same behaviour as maximize. The window leaves the tiling layer and its siblings fill the gap. On restore it rejoins at its original position.
-
-**Float** - pressing `Super+F` on a tiled window removes it from the tiling layer and centers it on screen at a configurable size (default 800×600). The other tiled windows reorganize to fill the space. Pressing `Super+F` again retiles the window at its original position with its saved ratio. Floating windows can be moved and resized freely.
-
-**Launched maximized** - some apps (like file managers or system dialogs) launch in maximized state. Tiler detects these and watches for them - as soon as they are unmaximized they join the tiling layer automatically.
-
-**Minimize while maximized** - if you minimize a window that is already maximized, Tiler handles this correctly without corrupting the saved ratio. Restoring from minimized then unmaximizing tiles the window correctly.
-
-### Mouse interaction
-
-**Live resize** - drag any window edge or corner handle and the neighbouring windows resize in real time alongside it. Each axis (horizontal/vertical) is handled independently. The final ratios are committed to the tree when you release the mouse.
-
-**Corner resize** - dragging a corner handle resizes both axes simultaneously. Each axis finds its own container boundary in the tree, so complex nested layouts resize correctly.
-
-**Drag to insert** - drag a tiled window over another tiled window. A blue highlight appears showing where the window will land:
-
-- Drop on the **left 30%** - inserts before the target window
-- Drop on the **right 30%** - inserts after the target window
-- Drop on the **top 30%** - inserts above the target window
-- Drop on the **bottom 30%** - inserts below the target window
-- The **middle 40%** is reserved for future use
-
-**Drag to swap** - press `Super+Shift+C` to switch to swap mode. Now dragging one window over another and releasing swaps their positions in the tree. An amber highlight shows the swap target. Press `Super+Shift+X` to return to insert mode. The mode resets to insert after each drag.
-
-**Snap back** - if you drag a tiled window but do not drop it on another window, it animates back to its tiled position smoothly.
-
-### Keyboard navigation
-
-Focus moves between tiled windows using vim-style directional keys. The algorithm finds the window that shares the most border area with the current window in the given direction, preferring the topmost or leftmost candidate when multiple windows are tied.
-
-| Shortcut  | Action                    |
-| --------- | ------------------------- |
-| `Super+H` | Focus window to the left  |
-| `Super+L` | Focus window to the right |
-| `Super+K` | Focus window above        |
-| `Super+J` | Focus window below        |
-
-### Keyboard resize
-
-Press `Super+Enter` to enter **keyboard resize mode**. A red border appears around the focused window indicating it is active. While in resize mode:
-
-| Shortcut        | Action                |
-| --------------- | --------------------- |
-| `Super+Shift+H` | Grow window leftward  |
-| `Super+Shift+L` | Grow window rightward |
-| `Super+Shift+K` | Grow window upward    |
-| `Super+Shift+J` | Grow window downward  |
-| `Super+Enter`   | Exit resize mode      |
-
-Each keypress moves the window edge by a configurable pixel step (default 50px). The resize algorithm walks up the container tree to find the correct neighbour to take space from, so it works correctly even when the neighbour is in a different container.
-
-Floating windows can also be resized in keyboard resize mode - their size changes freely without affecting any other window.
-
-### Borders
-
-Every tiled window gets a colored border that communicates its state at a glance:
-
-- **Blue** - the currently focused window
-- **Subtle white** - an unfocused tiled window
-- **Amber** - a floating window
-- **No border** - a maximized window
-
-Borders update instantly when focus changes. They follow the window correctly across workspaces, respect minimize animations (disappearing immediately when minimized), and stay correctly stacked above their window at all times.
-
-Border width, corner radius, and all three colors are configurable from the Appearance tab in preferences.
-
-### Workspace support
-
-Each workspace maintains its own completely independent container tree. Moving a window between workspaces reorganizes both the source and destination workspace layouts automatically. Dynamic workspaces are supported - when GNOME removes an empty workspace, all tree indices above it are shifted down correctly.
-
-### Retile
-
-Press `Super+Alt+T` to retile all windows on the current workspace. This is useful if any window has drifted from its tiled position or if you enable the extension with windows already open. Any window not currently tracked by the extension is added to the tiling layer automatically.
-
----
-
-## Settings
-
-Open preferences with `gnome-extensions prefs tiler@abdulmateenzwl`.
-
-### Appearance tab
-
-| Setting               | Description                              | Default   |
-| --------------------- | ---------------------------------------- | --------- |
-| Border Width          | Thickness of window borders in pixels    | 2         |
-| Border Radius         | Corner radius of borders                 | 12        |
-| Focused Border Color  | Border color for the focused window      | Blue      |
-| Tiled Border Color    | Border color for unfocused tiled windows | White 85% |
-| Floating Border Color | Border color for floating windows        | Amber     |
-| Gap Size              | Gap between windows in pixels            | 8         |
-
-### Behaviour tab
-
-| Setting                | Description                                    | Default |
-| ---------------------- | ---------------------------------------------- | ------- |
-| Float Width            | Default width when a window is floated         | 800     |
-| Float Height           | Default height when a window is floated        | 600     |
-| Horizontal Resize Step | Pixels per keypress when resizing horizontally | 50      |
-| Vertical Resize Step   | Pixels per keypress when resizing vertically   | 50      |
-
-### Keybindings tab
-
-Every shortcut can be changed, cleared, or reset to its default. Click the edit icon next to any shortcut, press the new key combination, and it saves automatically. Click the undo icon to reset to the schema default.
+**Settings changes do not take effect.** Settings apply live, so if they don't, the schema is likely stale. Recompile it and restart the session.
 
 ---
 
 ## Architecture
 
-Tiler is structured as five cooperating modules:
+Tiler is split into focused modules, each with a single responsibility.
 
-| File               | Responsibility                                                                      |
-| ------------------ | ----------------------------------------------------------------------------------- |
-| `extension.js`     | Entry point - wires all modules together                                            |
-| `containerTree.js` | BSP tree data model - insert, remove, collapse, restore, swap, insert-relative      |
-| `layoutEngine.js`  | Pure recursive layout calculator - takes a tree and a rect, returns pixel positions |
-| `windowTracker.js` | GNOME signal management - window lifecycle, state transitions, workspace events     |
-| `tileManager.js`   | Applies layouts to real windows - live resize, drag tracking, focus handling        |
-| `borderManager.js` | Window border overlays - creation, stacking, color updates                          |
-| `resizeManager.js` | Keyboard resize mode - indicator, directional resize, floating resize               |
-| `keybindings.js`   | GNOME keybinding registration                                                       |
-| `prefs.js`         | Extension preferences UI                                                            |
+| File | Responsibility |
+|---|---|
+| `extension.js` | Entry point. Instantiates and wires together every module, and connects the tracker's events to the border manager. |
+| `containerTree.js` | The pure tree data model. Insert, remove, collapse, restore, swap, and relative-insert operations. No GNOME dependencies. |
+| `layoutEngine.js` | A pure function that takes a tree node and a rectangle and returns pixel positions for every visible window. No side effects. |
+| `windowTracker.js` | Owns all GNOME signal connections. Manages window lifecycle and state transitions, and emits high-level events like window added, removed, maximized, and floating. |
+| `tileManager.js` | Applies calculated layouts to real windows. Handles live mouse resize, drag tracking, focus raising, and animations. |
+| `borderManager.js` | Creates and maintains the per-window border overlays, including stacking, workspace-aware visibility, and live color updates. |
+| `resizeManager.js` | Implements keyboard resize mode — the indicator, directional resizing across containers, and floating-window resizing. |
+| `keybindings.js` | Registers and unregisters all keyboard shortcuts. |
+| `prefs.js` | Builds the GNOME preferences window with its three tabs. |
 
-The layout engine is a pure function with no side effects. All tree mutations happen in `containerTree.js`. `windowTracker.js` owns all GNOME signal connections and emits higher-level events (`window-added`, `window-removed`, `window-maximized` etc.) that `tileManager.js` and `borderManager.js` listen to.
+The design keeps a strict separation between pure logic and GNOME integration. All tree mutations live in `containerTree.js`. The layout engine is a pure function that can be tested with plain JavaScript objects as stand-in windows, with no GNOME Shell running. The tracker is the only module that touches GNOME signals, and it translates low-level signals into clean high-level events that the other modules consume.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Here is how to get started:
+Contributions are welcome.
 
-### Setting up for development
+### Development setup
+
+Clone into the extensions directory, compile the schema, and enable:
 
 ```bash
 git clone https://github.com/abdulmateenzwl/tiler.git \
@@ -229,7 +304,7 @@ glib-compile-schemas \
 gnome-extensions enable tiler@abdulmateenzwl
 ```
 
-Log out and back in to load the extension. After any code change, log out and back in again to reload.
+Log out and back in to load it. After each code change, log out and back in again — Wayland does not allow in-place reloads.
 
 ### Viewing logs
 
@@ -237,45 +312,31 @@ Log out and back in to load the extension. After any code change, log out and ba
 journalctl /usr/bin/gnome-shell -f | grep Tiler
 ```
 
-### Testing the container tree in isolation
+### Testing the tree in isolation
 
-The tree logic can be tested outside GNOME Shell using GJS directly:
+Because the tree and layout engine are pure, they can be run outside GNOME Shell with GJS:
 
 ```bash
 gjs -m ~/.local/share/gnome-shell/extensions/tiler@abdulmateenzwl/test-tree.js
 ```
 
-### What to work on
-
-Check the TODO section below for planned features. Good first contributions:
-
-- **Window rules** - always float or always tile specific apps by WM class
-- **Multi-monitor support** - independent tree per monitor rather than primary only
-- **Layout presets** - save and restore named layouts per workspace
-- **Focus on close** - when a tiled window closes, focus the most recently used tiled window rather than GNOME's default MRU behaviour
-
 ### Guidelines
 
-- Keep all tree mutations inside `containerTree.js`
-- Keep `layoutEngine.js` a pure function - no side effects, no global access
-- All GNOME signal connections must be stored and disconnected in `disable()`
-- Test maximize, minimize, float, and workspace-move after any tree change
+- Keep all tree mutations inside `containerTree.js`.
+- Keep `layoutEngine.js` a pure function with no side effects and no global access.
+- Every GNOME signal you connect must be stored and disconnected in the relevant `disable()` path.
+- After any change to tree logic, manually test maximize, minimize, float, and moving a window between workspaces — these are the operations most likely to expose edge cases.
 
 ### Reporting issues
 
-Please include:
-
-- GNOME Shell version (`gnome-shell --version`)
-- The relevant journal output (`journalctl /usr/bin/gnome-shell | grep Tiler`)
-- Steps to reproduce
+When opening an issue, please include your GNOME Shell version, the relevant output from `journalctl /usr/bin/gnome-shell | grep Tiler`, and clear steps to reproduce the problem.
 
 ---
 
-## TODO
+## Roadmap
 
-- When a tiled window is closed, switch focus to the most recently used tiled window instead of GNOME's default MRU
-- Multi-monitor support - independent tree per monitor
-- Layout presets - quickly switch between common layouts (equal columns, main+stack, centered master)
-- Window rules - always float or always tile specific apps by WM class
-- Scratchpad workspace - send windows to a hidden workspace and recall them with a keybinding
-- Per-workspace layout persistence across sessions
+- When a tiled window closes, move focus to the most recently used tiled window rather than GNOME's default order.
+- Multi-monitor support with an independent tree per monitor.
+- Layout presets for quickly switching between common arrangements.
+- Window rules to always float or always tile specific applications by their window class.
+- A scratchpad workspace for stashing and recalling windows with a shortcut.
