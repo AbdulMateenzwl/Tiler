@@ -50,9 +50,17 @@ Everything in Tiler is built on three ideas.
 
 **The tree.** Each workspace has its own tree. Every window is a *leaf* in that tree. Branches are *containers* that arrange their children either horizontally (side by side) or vertically (stacked). Containers can hold other containers, so the tree nests to any depth. This is how complex layouts are expressed — a horizontal row that contains a vertical column that contains another horizontal row, and so on.
 
+![Tiler container tree structure](images/tiler_container_tree_structure.png)
+
+The diagram above shows a real layout: a root horizontal container holding window A on the left, a vertical container in the middle (itself holding windows B, C, and D), and window E on the right.
+
 **Ratios.** Every node carries a ratio representing its share of its parent's space. Three windows side by side each have a ratio around 0.33. If you resize one to take half the width, its ratio becomes 0.5 and its neighbours shrink to fill the rest. Ratios are normalized on the fly during layout calculation, so they never need to sum to exactly one.
 
 **Collapse and restore.** When a window leaves the tiling layer — because it was minimized, maximized, or floated — it is not removed from the tree. Instead its ratio is set to zero and its real ratio is saved. A ratio of zero means the layout engine skips the window entirely and its siblings expand to fill the space. When the window comes back, the saved ratio is restored and the siblings shrink proportionally to make room. This single mechanism powers minimize, maximize, and float, and it is what makes restoration so reliable.
+
+**Container cleanup.** A container that ends up holding only one child serves no purpose. When this happens — for example after the other windows in a nested column are closed — Tiler dissolves the redundant container and promotes the surviving window up to take its place, inheriting its ratio. This propagates upward recursively, so the tree never accumulates dead structure.
+
+![Single child container collapse promotes the window up a level](images/tiler_single_child_collapse.png)
 
 ---
 
@@ -75,7 +83,13 @@ If the focused window's container already runs in the chosen direction, the new 
 
 Minimizing a window collapses it out of the tiling layer using the ratio-zero mechanism. Its siblings expand to fill the freed space. The window keeps its position in the tree and a saved copy of its ratio.
 
+![Minimizing a window redistributes its ratio to siblings](images/tiler_minimize_redistribution.png)
+
 When you restore it, Tiler writes the saved ratio back and scales the currently visible siblings down proportionally to make room. The important detail is *proportionally to their current sizes* — if you resized any of those siblings while the window was minimized, those changes are respected. The restored window always lands in a valid, natural-looking layout regardless of what happened while it was away.
+
+![Restoring a window after its siblings were resized](images/tiler_restore_after_resize.png)
+
+In the diagram above, window C was minimized, then B was grown and D shrunk. On restore, C reclaims its saved ratio while B and D give up space in proportion to their current sizes — so the resizing done while C was away is preserved.
 
 ### Maximize
 
