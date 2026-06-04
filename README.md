@@ -8,6 +8,13 @@ Tiler is built from scratch on GNOME Shell 46+ running on Wayland. The core is a
 
 ---
 
+## Video demo
+
+<video src="./videos/Every New laucnhed window is tiled.mp4" controls width="600">
+  Your browser does not support the video tag.
+</video>
+
+
 ## Table of contents
 
 - [Why Tiler exists](#why-tiler-exists)
